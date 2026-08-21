@@ -51,6 +51,11 @@ import { Badge } from "@nous-research/ui/ui/components/badge";
 import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
+import {
+  ConfigDiffModal,
+  computeFormDiff,
+  type ConfigDiffPayload,
+} from "@/components/ConfigDiffModal";
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -120,6 +125,16 @@ export default function ConfigPage() {
   const [configPath, setConfigPath] = useState<string | null>(null);
   const [activeCategory, setActiveCategory] = useState<string>("");
   const [confirmReset, setConfirmReset] = useState(false);
+  // Snapshots of what was loaded from disk.  We diff the current state
+  // against these so the review modal can show what actually changed.
+  const [loadedConfig, setLoadedConfig] = useState<Record<
+    string,
+    unknown
+  > | null>(null);
+  const [loadedYaml, setLoadedYaml] = useState<string | null>(null);
+  const [diffPayload, setDiffPayload] = useState<ConfigDiffPayload | null>(
+    null,
+  );
   const { toast, showToast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { t } = useI18n();
@@ -164,7 +179,10 @@ export default function ConfigPage() {
   useEffect(() => {
     api
       .getConfig()
-      .then(setConfig)
+      .then((c) => {
+        setConfig(c);
+        setLoadedConfig(c);
+      })
       .catch(() => {});
     api
       .getSchema()
@@ -215,7 +233,10 @@ export default function ConfigPage() {
       setYamlLoading(true);
       api
         .getConfigRaw()
-        .then((resp) => setYamlText(resp.yaml))
+        .then((resp) => {
+          setYamlText(resp.yaml);
+          setLoadedYaml(resp.yaml);
+        })
         .catch(() => showToast(t.config.failedToLoadRaw, "error"))
         .finally(() => setYamlLoading(false));
     }
@@ -276,30 +297,72 @@ export default function ConfigPage() {
   }, [schema, activeCategory, isSearching]);
 
   /* ---- Handlers ---- */
-  const handleSave = async () => {
+  const handleSave = () => {
+    if (!config || !schema) return;
+    // Build the form-mode diff against the loaded snapshot.  If the user
+    // hasn't changed anything we just toast and bail rather than open a
+    // pointless modal.
+    const changes = computeFormDiff(loadedConfig, config, schema);
+    if (changes.length === 0) {
+      showToast(
+        t.configDiff?.nothingToSave ?? "Nothing to save — no changes detected.",
+        "success",
+      );
+      return;
+    }
+    setDiffPayload({
+      mode: "form",
+      schema,
+      changes,
+      path: configPath,
+    });
+  };
+
+  const applyFormSave = async () => {
     if (!config) return;
     setSaving(true);
     try {
       await api.saveConfig(config);
+      // Refresh the loaded snapshot so the next save diff starts clean.
+      setLoadedConfig(config);
       showToast(t.config.configSaved, "success");
+      setDiffPayload(null);
     } catch (e) {
       showToast(`${t.config.failedToSave}: ${e}`, "error");
+      throw e;
     } finally {
       setSaving(false);
     }
   };
 
-  const handleYamlSave = async () => {
+  const handleYamlSave = () => {
+    setDiffPayload({
+      mode: "yaml",
+      beforeYaml: loadedYaml ?? "",
+      afterYaml: yamlText,
+      path: configPath,
+    });
+  };
+
+  const applyYamlSave = async () => {
     setYamlSaving(true);
     try {
       await api.saveConfigRaw(yamlText);
       showToast(t.config.yamlConfigSaved, "success");
+      setLoadedYaml(yamlText);
+      // Refresh the in-memory config so the form view (if the user flips
+      // back) reflects the new state.
       api
         .getConfig()
-        .then(setConfig)
+        .then((c) => {
+          setConfig(c);
+          setLoadedConfig(c);
+        })
         .catch(() => {});
+      setDiffPayload(null);
     } catch (e) {
       showToast(`${t.config.failedToSaveYaml}: ${e}`, "error");
+      throw e;
     } finally {
       setYamlSaving(false);
     }
@@ -673,6 +736,16 @@ export default function ConfigPage() {
         } field(s) to their default values.`}
         destructive
         confirmLabel={t.config.resetDefaults}
+      />
+      <ConfigDiffModal
+        payload={diffPayload}
+        onCancel={() => setDiffPayload(null)}
+        onConfirm={() => {
+          if (!diffPayload) return Promise.resolve();
+          return diffPayload.mode === "form"
+            ? applyFormSave()
+            : applyYamlSave();
+        }}
       />
     </div>
   );
