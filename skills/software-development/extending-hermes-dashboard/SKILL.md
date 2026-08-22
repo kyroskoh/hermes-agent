@@ -1,6 +1,6 @@
 ---
 name: extending-hermes-dashboard
-description: Use when adding features to Hermes's web dashboard SPA. Covers the React/Vite app under web/src/, the dashboard lazy-loading pattern, i18n cascade across 17 locales, modal shell conventions, and the command palette extension hook. Load before touching anything under web/src/.
+description: Add features to Hermes's web dashboard SPA under web/src/.
 version: 1.0.0
 author: kyroskoh-bot
 license: MIT
