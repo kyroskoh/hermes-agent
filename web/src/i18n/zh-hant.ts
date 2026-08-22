@@ -171,7 +171,7 @@ export const zhHant: Translations = {
       user: "使用者",
       assistant: "助理",
       system: "系統",
-      tool: "工具",,
+      tool: "工具",
       memoryStored: "+記憶",
       memorySkillStored: "+技能",
       memoryStoredTitle: "已從本輪對話存入記憶",

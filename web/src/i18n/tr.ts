@@ -171,7 +171,7 @@ export const tr: Translations = {
       user: "Kullanıcı",
       assistant: "Asistan",
       system: "Sistem",
-      tool: "Araç",,
+      tool: "Araç",
       memoryStored: "+memory",
       memorySkillStored: "+skill",
       memoryStoredTitle: "Bu turdan hafızaya kaydedildi",

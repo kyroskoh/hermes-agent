@@ -171,7 +171,7 @@ export const af: Translations = {
       user: "Gebruiker",
       assistant: "Assistent",
       system: "Stelsel",
-      tool: "Gereedskap",,
+      tool: "Gereedskap",
       memoryStored: "+memory",
       memorySkillStored: "+skill",
       memoryStoredTitle: "Geheue gestoor vanaf hierdie beurt",

@@ -171,7 +171,7 @@ export const hu: Translations = {
       user: "Felhasználó",
       assistant: "Asszisztens",
       system: "Rendszer",
-      tool: "Eszköz",,
+      tool: "Eszköz",
       memoryStored: "+memory",
       memorySkillStored: "+skill",
       memoryStoredTitle: "Memória elmentve ebből a körből",

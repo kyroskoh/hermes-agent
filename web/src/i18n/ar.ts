@@ -152,7 +152,7 @@ export const ar = defineLocale({
       user: "المستخدم",
       assistant: "المساعد",
       system: "النظام",
-      tool: "أداة",,
+      tool: "أداة",
       memoryStored: "+memory",
       memorySkillStored: "+skill",
       memoryStoredTitle: "تم تخزين الذاكرة من هذه الجولة",

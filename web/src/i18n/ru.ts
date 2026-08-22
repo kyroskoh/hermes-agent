@@ -171,7 +171,7 @@ export const ru: Translations = {
       user: "Пользователь",
       assistant: "Ассистент",
       system: "Система",
-      tool: "Инструмент",,
+      tool: "Инструмент",
       memoryStored: "+memory",
       memorySkillStored: "+skill",
       memoryStoredTitle: "Память сохранена из этого хода",

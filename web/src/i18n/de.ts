@@ -171,7 +171,7 @@ export const de: Translations = {
       user: "Benutzer",
       assistant: "Assistent",
       system: "System",
-      tool: "Werkzeug",,
+      tool: "Werkzeug",
       memoryStored: "+memory",
       memorySkillStored: "+skill",
       memoryStoredTitle: "Speicher aus dieser Runde gespeichert",

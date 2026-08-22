@@ -171,7 +171,7 @@ export const ko: Translations = {
       user: "사용자",
       assistant: "어시스턴트",
       system: "시스템",
-      tool: "도구",,
+      tool: "도구",
       memoryStored: "+memory",
       memorySkillStored: "+skill",
       memoryStoredTitle: "이 턴에서 메모리가 저장됨",

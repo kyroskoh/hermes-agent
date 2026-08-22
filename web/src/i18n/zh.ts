@@ -169,7 +169,7 @@ export const zh: Translations = {
       user: "用户",
       assistant: "助手",
       system: "系统",
-      tool: "工具",,
+      tool: "工具",
       memoryStored: "+记忆",
       memorySkillStored: "+技能",
       memoryStoredTitle: "已从本轮对话存入记忆",

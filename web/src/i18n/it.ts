@@ -171,7 +171,7 @@ export const it: Translations = {
       user: "Utente",
       assistant: "Assistente",
       system: "Sistema",
-      tool: "Strumento",,
+      tool: "Strumento",
       memoryStored: "+memory",
       memorySkillStored: "+skill",
       memoryStoredTitle: "Memoria salvata da questo turno",

@@ -171,7 +171,7 @@ export const uk: Translations = {
       user: "Користувач",
       assistant: "Асистент",
       system: "Система",
-      tool: "Інструмент",,
+      tool: "Інструмент",
       memoryStored: "+memory",
       memorySkillStored: "+skill",
       memoryStoredTitle: "Пам'ять збережено з цього ходу",

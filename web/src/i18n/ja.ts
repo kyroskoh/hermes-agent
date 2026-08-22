@@ -171,7 +171,7 @@ export const ja: Translations = {
       user: "ユーザー",
       assistant: "アシスタント",
       system: "システム",
-      tool: "ツール",,
+      tool: "ツール",
       memoryStored: "+memory",
       memorySkillStored: "+skill",
       memoryStoredTitle: "このターンから記憶を保存しました",

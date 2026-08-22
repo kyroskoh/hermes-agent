@@ -171,7 +171,7 @@ export const ga: Translations = {
       user: "Úsáideoir",
       assistant: "Cúntóir",
       system: "Córas",
-      tool: "Uirlis",,
+      tool: "Uirlis",
       memoryStored: "+memory",
       memorySkillStored: "+skill",
       memoryStoredTitle: "Cuimhne stóráilte ón iompair seo",
