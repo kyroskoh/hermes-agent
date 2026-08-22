@@ -323,6 +323,11 @@ class TestGitHubCommentDelivery:
             )
 
         assert result.success is True
+        # The github-app-auth adapter injects an env dict so the gh subprocess
+        # runs as the App bot when GITHUB_APP_* vars are set; in this test
+        # no App creds are configured, so the helper just returns a copy of
+        # the gateway's env. We pin the explicit kwargs and accept env=ANY.
+        from unittest.mock import ANY
         mock_run.assert_called_once_with(
             [
                 "gh", "pr", "comment", "42",
@@ -334,7 +339,10 @@ class TestGitHubCommentDelivery:
             encoding="utf-8",
             errors="replace",
             timeout=30,
+            env=ANY,
         )
+        # Sanity: env must be a dict (whatever its contents)
+        assert isinstance(mock_run.call_args.kwargs["env"], dict)
         # Delivery info is retained after send() so interim status messages
         # don't strand the final response (TTL-based cleanup happens on POST).
         assert chat_id in adapter._delivery_info

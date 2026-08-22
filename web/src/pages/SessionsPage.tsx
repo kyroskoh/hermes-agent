@@ -291,6 +291,145 @@ function splitCompactionContent(content: string): CompactionSplit | null {
 }
 
 
+/** "💾 Memory stored" card rendered for every background self-improvement
+ * review that wrote something the user said to memory or skills.
+ *
+ * The card replaces the generic MessageBubble for ``display_kind ===
+ * "learning_event"`` messages so a session where the agent learned from
+ * the user surfaces a clear, badge-headed audit row in the transcript:
+ *
+ *   ┌─────────────────────────────────────────────────────────┐
+ *   │ [+memory]  Memory stored from this turn        2h ago   │
+ *   │ The background review wrote this to memory after your   │
+ *   │ messages…                                              │
+ *   │                                                         │
+ *   │ What was stored:                                        │
+ *   │  • Memory ➕ Prefers concise responses                   │
+ *   │  • Skill 'hermes-release' patched                       │
+ *   └─────────────────────────────────────────────────────────┘
+ *
+ * The action list comes from ``msg.display_metadata.actions`` — the
+ * background review already populated each entry with the precise
+ * sentence/snippet it stored (verbose mode) or a "Memory updated" /
+ * "Skill 'X' patched" sentinel (on mode). For sessions whose memory
+ * tool wasn't granted, the card still renders with the content text
+ * as a fallback so old sessions aren't blank.
+ *
+ * ``highlight`` is the Sessions-page search query, when present. Search
+ * terms are highlighted inline in the action lines and the content
+ * fallback so the user can find a stored memory by the words it
+ * contains (same affordance as the generic bubble).
+ */
+function MemoryEventCard({
+  msg,
+  highlight,
+  matchBadge,
+}: {
+  msg: SessionMessage;
+  highlight?: string;
+  matchBadge?: boolean;
+}) {
+  const { t } = useI18n();
+  const metadata = msg.display_metadata ?? {};
+  const rawActions =
+    Array.isArray((metadata as { actions?: unknown }).actions)
+      ? ((metadata as { actions: unknown[] }).actions.filter(
+          (a) => typeof a === "string",
+        ) as string[])
+      : [];
+  // Detect whether the review wrote only to skills (so we surface "+skill"
+  // instead of "+memory" — both kinds are first-class audit entries).
+  const onlySkills =
+    rawActions.length > 0 &&
+    rawActions.every((a) => /^[Ss]kill\b|📝\s*Skill/.test(a));
+  const badgeLabel = onlySkills
+    ? t.sessions.roles.memorySkillStored
+    : t.sessions.roles.memoryStored;
+
+  // Format the timestamp as both a relative timeAgo (compact, default)
+  // and a full local datetime so the user can see the precise moment
+  // the memory was written without leaving the page.
+  const ts = typeof msg.timestamp === "number" ? msg.timestamp : undefined;
+  const tsIso = ts ? new Date(ts * 1000).toISOString() : null;
+  const tsLocal = ts ? new Date(ts * 1000).toLocaleString() : null;
+
+  // Compute search-highlight terms once and reuse across the action
+  // list + the content fallback so the user can search inside a
+  // session's memory events the same way they search inside messages.
+  const highlightTerms = highlight
+    ? highlight.split(/\s+/).filter(Boolean)
+    : undefined;
+
+  return (
+    <div
+      className="bg-warning/10 border-l-2 border-warning p-3 ring-1 ring-warning/30"
+      data-search-hit={matchBadge || undefined}
+      title={
+        tsLocal
+          ? `${t.sessions.roles.memoryStoredTitle} — ${tsLocal}`
+          : t.sessions.roles.memoryStoredTitle
+      }
+    >
+      <div className="flex items-center gap-2 flex-wrap">
+        <Badge tone="warning" className="text-xs font-semibold">
+          {badgeLabel}
+        </Badge>
+        <span className="text-xs font-semibold text-warning">
+          {t.sessions.roles.memoryStoredTitle}
+        </span>
+        {ts && (
+          <span
+            className="text-xs text-text-tertiary ml-auto"
+            title={tsIso ?? undefined}
+          >
+            {timeAgo(ts)}
+            {tsLocal && (
+              <span className="ml-1 text-text-tertiary/70">
+                · {tsLocal}
+              </span>
+            )}
+          </span>
+        )}
+        {matchBadge && (
+          <Badge tone="warning" className="text-xs py-0 px-1.5">
+            {t.common.match}
+          </Badge>
+        )}
+      </div>
+      <p className="text-xs text-text-secondary mt-1 leading-relaxed">
+        {t.sessions.roles.memoryStoredDescription}
+      </p>
+      {rawActions.length > 0 ? (
+        <div className="mt-2">
+          <div className="text-[10px] uppercase tracking-wide text-text-tertiary mb-1">
+            {t.sessions.roles.memoryActionsHeading}
+          </div>
+          <ul className="space-y-1">
+            {rawActions.map((action, i) => (
+              <li
+                key={i}
+                className="text-sm text-foreground bg-background/40 rounded px-2 py-1 leading-relaxed border border-warning/20"
+              >
+                <Markdown content={action} highlightTerms={highlightTerms} />
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        // Fallback for older sessions / non-verbose mode where the backend
+        // only wrote the rolled-up summary string into ``content``. Show
+        // that as a single quoted sentence so the row is never blank.
+        msg.content && (
+          <div className="mt-2 text-sm text-foreground bg-background/40 rounded px-2 py-1 leading-relaxed border border-warning/20">
+            <Markdown content={msg.content} highlightTerms={highlightTerms} />
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+
 function MessageBubble({
   msg,
   highlight,
@@ -370,6 +509,30 @@ function MessageBubble({
   }
 
   const isCompaction = compactionSplit !== null;
+
+  // Search-hit detection runs before the early-return so the
+  // ``MemoryEventCard`` delegate can render the same "match" badge the
+  // generic bubble does.
+  const isHit = (() => {
+    if (!highlight || !msg.content) return false;
+    const content = msg.content.toLowerCase();
+    const terms = highlight.toLowerCase().split(/\s+/).filter(Boolean);
+    return terms.some((term) => content.includes(term));
+  })();
+
+  // Learning events get their own dedicated card so the "+memory" badge,
+  // exact datetime, and per-action sentence list are first-class UI
+  // instead of a buried blob in a faded yellow bubble. See
+  // ``MemoryEventCard`` for the rendering contract.
+  if (msg.display_kind === "learning_event") {
+    return (
+      <MemoryEventCard
+        msg={msg}
+        highlight={highlight}
+        matchBadge={isHit}
+      />
+    );
+  }
   const style = isCompaction
     ? ROLE_STYLES.compaction
     : ROLE_STYLES[msg.role] ?? ROLE_STYLES.system;
@@ -378,14 +541,6 @@ function MessageBubble({
     : msg.tool_name
       ? `${t.sessions.roles.tool}: ${msg.tool_name}`
       : style.label;
-
-  // Check if any search term appears as a prefix of any word in content
-  const isHit = (() => {
-    if (!highlight || !msg.content) return false;
-    const content = msg.content.toLowerCase();
-    const terms = highlight.toLowerCase().split(/\s+/).filter(Boolean);
-    return terms.some((term) => content.includes(term));
-  })();
 
   // Split search query into terms for inline highlighting
   const highlightTerms =

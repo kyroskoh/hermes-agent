@@ -230,7 +230,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                busy_policy="dispatch"),
     CommandDef("whoami", "Show your slash command access (admin / user)", "Info"),
     CommandDef("profile", "Show active profile name and home directory", "Info",
-               busy_policy="dispatch", execute="profile"),
+               busy_policy="dispatch", execute="profile",
+               aliases=("p", "pro", "agent")),
     CommandDef("sethome", "Set this chat as the home channel", "Session",
                gateway_only=True, aliases=("set-home",)),
     CommandDef("resume", "Resume a previously-named session", "Session",
@@ -251,7 +252,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                busy_policy="reject", busy_handler="codex-runtime"),
 
     CommandDef("personality", "Set a predefined personality", "Configuration",
-               args_hint="[name]"),
+               args_hint="[name]", aliases=("p2", "persona", "r")),
     CommandDef("statusbar", "Toggle the context/model status bar", "Configuration",
                cli_only=True, aliases=("sb",)),
     CommandDef("battery", "Toggle a color-coded battery indicator in the status bar",
@@ -348,6 +349,9 @@ COMMAND_REGISTRY: list[CommandDef] = [
                aliases=("reload_mcp",)),
     CommandDef("reload-skills", "Re-scan ~/.hermes/skills/ for newly installed or removed skills",
                "Tools & Skills", aliases=("reload_skills",)),
+    CommandDef("reload-lookups", "Reload cached gateway lookups (commands, skills, profile routing) without restart",
+               "Tools & Skills", aliases=("reload_lookups",),
+               gateway_only=True, busy_policy="dispatch", execute="reload"),
     CommandDef("browser", "Connect browser tools to your live Chromium-family browser via CDP, or switch to Browser Use mode", "Tools & Skills",
                cli_only=True, args_hint="[connect|disconnect|status|use]",
                subcommands=("connect", "disconnect", "status", "use")),
@@ -1366,7 +1370,7 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 #     (session export is an interactive surface; platform is a rare
 #     informational lookup) — without this entry /save tips the registry
 #     past the 50-cap and silently clamps /platform, breaking parity.
-_SLACK_VIA_HERMES_ONLY = frozenset({"topup", "moa", "debug", "egress", "init", "version", "diff", "update", "heartbeat", "refine", "pause", "whoami", "platform"})
+_SLACK_VIA_HERMES_ONLY = frozenset({"topup", "moa", "debug", "egress", "init", "version", "diff", "update", "heartbeat", "refine", "pause", "whoami", "platform", "insights"})
 
 
 def _sanitize_slack_name(raw: str) -> str:

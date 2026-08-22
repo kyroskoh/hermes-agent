@@ -572,6 +572,12 @@ def _apply_profile_override() -> None:
     # 1. Check for explicit -p / --profile flag. Historically this worked even
     # after the subcommand (`hermes chat -p coder`), so keep scanning broadly.
     # The exception is command-argv passthrough regions such as `mcp add --args`.
+    #
+    # CLI alias family for /profile (read-only): -p (legacy), -pro, -agent.
+    # CLI alias family for /personality (overlay): -p2, -persona.
+    # (/r stays gateway-slash-only — it would collide with --resume.)
+    profile_flag_aliases = ("--profile", "-p", "-pro", "-agent")
+    personality_flag_aliases = ("--personality", "-p2", "-persona")
     value_flags = {
         "-z", "--oneshot",
         "-m", "--model",
@@ -583,6 +589,9 @@ def _apply_profile_override() -> None:
         "--in",
     }
     optional_value_flags = {"-c", "--continue"}
+    personality_name = None
+    personality_index = None
+    personality_consume = 0
     i = 0
     while i < len(argv):
         arg = argv[i]
@@ -590,7 +599,7 @@ def _apply_profile_override() -> None:
             break
         if arg == "--args" and _inside_mcp_add_args(i):
             break
-        if arg in {"--profile", "-p"} and i + 1 < len(argv):
+        if arg in profile_flag_aliases and i + 1 < len(argv):
             profile_name = argv[i + 1]
             consume = 2
             profile_index = i
@@ -599,6 +608,17 @@ def _apply_profile_override() -> None:
             profile_name = arg.split("=", 1)[1]
             consume = 1
             profile_index = i
+            break
+        if arg in personality_flag_aliases and i + 1 < len(argv):
+            personality_name = argv[i + 1]
+            personality_consume = 2
+            personality_index = i
+            i += 2
+            continue
+        if arg.startswith("--personality="):
+            personality_name = arg.split("=", 1)[1]
+            personality_consume = 1
+            personality_index = i
             break
         if "=" not in arg and arg in value_flags and i + 1 < len(argv):
             i += 2
@@ -611,6 +631,31 @@ def _apply_profile_override() -> None:
             i += 2
         else:
             i += 1
+
+    # Apply personality overlay AFTER the profile-name scan so the order of
+    # -p / -p2 doesn't matter. Use the single-sanctioned write path so the
+    # config key is set exactly the same way the /personality slash command
+    # would set it. Empty/neutral names are forwarded as-is and resolve to
+    # the cleared overlay.
+    if personality_name is not None:
+        try:
+            from hermes_cli.personality import (
+                normalize_personality_name,
+                persist_personality,
+            )
+
+            normalised = normalize_personality_name(personality_name)
+            persist_personality(normalised)
+        except Exception as exc:  # pragma: no cover - defensive
+            print(
+                f"Warning: --personality override failed ({exc}), ignoring.",
+                file=sys.stderr,
+            )
+        # Strip the flag from argv so argparse doesn't choke.  Done last so
+        # the profile-name scan above sees the full argv.
+        if personality_consume > 0 and personality_index is not None:
+            start = personality_index + 1
+            sys.argv = sys.argv[:start] + sys.argv[start + personality_consume :]
 
     # 1b. Reject values that can't be valid profile names (e.g. pytest's
     # "-p no:xdist" would be misread as profile "no:xdist" otherwise).

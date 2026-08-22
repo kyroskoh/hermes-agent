@@ -442,6 +442,8 @@ export interface Translations {
     actions?: string;
     manageSkills?: string;
     activeSetHint?: string;
+    chatAs?: string;
+    chatAsHint?: string;
   };
 
   // ── Skills page ──

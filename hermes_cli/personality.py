@@ -34,8 +34,16 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
 
-#: Names that mean "no personality overlay".
-NEUTRAL_PERSONALITY_NAMES = frozenset({"", "none", "default", "neutral"})
+#: Names that mean "no personality overlay". ``"default"`` and ``"kyros"``
+#: are symbolic aliases for the default-profile / no-overlay state — they
+#: exist so operators can type ``/personality default`` or ``/personality kyros``
+#: to clear an active overlay without having to remember the literal word
+#: ``"none"``. (The agent-internal persona id ``kyros`` is the same string as
+#: the canonical AI peer name in Honcho; that's intentional — operator-mode
+#: "kyros" *is* the base profile when no overlay is active.)
+NEUTRAL_PERSONALITY_NAMES = frozenset(
+    {"", "none", "default", "neutral", "kyros"}
+)
 
 #: Built-in personalities, available on every surface (CLI, gateway, TUI,
 #: desktop) without any config. User entries in ``agent.personalities``
@@ -102,8 +110,21 @@ def describe_personality(value: Any, width: int = 50) -> str:
 
 
 def normalize_personality_name(value: Any) -> str:
-    """Canonical form of a personality name ('' for any neutral spelling)."""
-    name = str(value or "").strip().lower()
+    """Canonical form of a personality name ('' for any neutral spelling).
+
+    Case-insensitive: ``"Kyros"``, ``"KYROS"``, ``"kyros"`` all normalize to the
+    same canonical value. Whitespace around the input is stripped. Returns
+    ``""`` for every neutral spelling (none / default / neutral / kyros) so
+    downstream ``resolve_personality``/``active_personality_name`` callers
+    all see the same canonical empty string.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    # ``casefold`` is the Unicode-safe version of ``lower`` (e.g. for the
+    # German ß). For the small set of allowed ASCII names this is
+    # indistinguishable from ``.lower()`` but it's the canonical choice.
+    name = raw.casefold()
     return "" if name in NEUTRAL_PERSONALITY_NAMES else name
 
 
