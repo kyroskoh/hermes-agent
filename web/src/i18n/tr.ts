@@ -171,13 +171,13 @@ export const tr: Translations = {
       user: "Kullanıcı",
       assistant: "Asistan",
       system: "Sistem",
-      tool: "Araç",
-      memoryStored: "+memory",
-      memorySkillStored: "+skill",
-      memoryStoredTitle: "Bu turdan hafızaya kaydedildi",
-      memoryStoredDescription: "Arka plan incelemesi mesajlarınızı okuduktan sonra bunu hafızaya yazdı. Bu satırdaki her şey gelecekteki oturumlarda hatırlanacak.",
-      memoryActionsHeading: "Ne kaydedildi"
+      tool: "Araç"
     },
+    memoryStored: "+memory",
+    memorySkillStored: "+skill",
+    memoryStoredTitle: "Bu turdan hafızaya kaydedildi",
+    memoryStoredDescription: "Arka plan incelemesi mesajlarınızı okuduktan sonra bunu hafızaya yazdı. Bu satırdaki her şey gelecekteki oturumlarda hatırlanacak.",
+    memoryActionsHeading: "Ne kaydedildi"
   },
 
   analytics: {

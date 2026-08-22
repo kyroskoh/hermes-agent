@@ -152,13 +152,13 @@ export const ar = defineLocale({
       user: "المستخدم",
       assistant: "المساعد",
       system: "النظام",
-      tool: "أداة",
-      memoryStored: "+memory",
-      memorySkillStored: "+skill",
-      memoryStoredTitle: "تم تخزين الذاكرة من هذه الجولة",
-      memoryStoredDescription: "كتب المراجعة الخلفية هذا في الذاكرة بعد قراءة رسائلك. سيتم تذكر أي شيء في هذا الصف في الجلسات المستقبلية.",
-      memoryActionsHeading: "ما تم تخزينه"
+      tool: "أداة"
     },
+    memoryStored: "+memory",
+    memorySkillStored: "+skill",
+    memoryStoredTitle: "تم تخزين الذاكرة من هذه الجولة",
+    memoryStoredDescription: "كتب المراجعة الخلفية هذا في الذاكرة بعد قراءة رسائلك. سيتم تذكر أي شيء في هذا الصف في الجلسات المستقبلية.",
+    memoryActionsHeading: "ما تم تخزينه"
   },
 
   analytics: {

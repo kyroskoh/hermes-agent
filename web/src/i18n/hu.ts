@@ -171,13 +171,13 @@ export const hu: Translations = {
       user: "Felhasználó",
       assistant: "Asszisztens",
       system: "Rendszer",
-      tool: "Eszköz",
-      memoryStored: "+memory",
-      memorySkillStored: "+skill",
-      memoryStoredTitle: "Memória elmentve ebből a körből",
-      memoryStoredDescription: "A háttér-ellenőrzés az üzeneteid elolvasása után írta ezt a memóriába. Minden ebben a sorban a jövőbeli munkamenetekben is megjelenik.",
-      memoryActionsHeading: "Amit elmentettünk"
+      tool: "Eszköz"
     },
+    memoryStored: "+memory",
+    memorySkillStored: "+skill",
+    memoryStoredTitle: "Memória elmentve ebből a körből",
+    memoryStoredDescription: "A háttér-ellenőrzés az üzeneteid elolvasása után írta ezt a memóriába. Minden ebben a sorban a jövőbeli munkamenetekben is megjelenik.",
+    memoryActionsHeading: "Amit elmentettünk"
   },
 
   analytics: {

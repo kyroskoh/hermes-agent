@@ -171,13 +171,13 @@ export const ga: Translations = {
       user: "Úsáideoir",
       assistant: "Cúntóir",
       system: "Córas",
-      tool: "Uirlis",
-      memoryStored: "+memory",
-      memorySkillStored: "+skill",
-      memoryStoredTitle: "Cuimhne stóráilte ón iompair seo",
-      memoryStoredDescription: "Scríobh an t-athbhreithniú cúlra é seo chuig an gcuimhne tar éis do do theachtaireachtaí a léamh. Cuimhneofar aon rud sa ró seo i seisiúin amach anseo.",
-      memoryActionsHeading: "Cad a stóráiladh"
+      tool: "Uirlis"
     },
+    memoryStored: "+memory",
+    memorySkillStored: "+skill",
+    memoryStoredTitle: "Cuimhne stóráilte ón iompair seo",
+    memoryStoredDescription: "Scríobh an t-athbhreithniú cúlra é seo chuig an gcuimhne tar éis do do theachtaireachtaí a léamh. Cuimhneofar aon rud sa ró seo i seisiúin amach anseo.",
+    memoryActionsHeading: "Cad a stóráiladh"
   },
 
   analytics: {

@@ -169,13 +169,13 @@ export const zh: Translations = {
       user: "用户",
       assistant: "助手",
       system: "系统",
-      tool: "工具",
-      memoryStored: "+记忆",
-      memorySkillStored: "+技能",
-      memoryStoredTitle: "已从本轮对话存入记忆",
-      memoryStoredDescription: "后台回顾在你发言后把内容写入了记忆。该行中的所有内容都将在未来的会话中被回想起。",
-      memoryActionsHeading: "已存入的内容"
+      tool: "工具"
     },
+    memoryStored: "+记忆",
+    memorySkillStored: "+技能",
+    memoryStoredTitle: "已从本轮对话存入记忆",
+    memoryStoredDescription: "后台回顾在你发言后把内容写入了记忆。该行中的所有内容都将在未来的会话中被回想起。",
+    memoryActionsHeading: "已存入的内容"
   },
 
   analytics: {

@@ -171,13 +171,13 @@ export const fr: Translations = {
       user: "Utilisateur",
       assistant: "Assistant",
       system: "Système",
-      tool: "Outil",
-      memoryStored: "+memory",
-      memorySkillStored: "+skill",
-      memoryStoredTitle: "Mémoire enregistrée depuis ce tour",
-      memoryStoredDescription: "La revue en arrière-plan a écrit ceci en mémoire après avoir lu tes messages. Tout dans cette ligne sera rappelé dans les sessions futures.",
-      memoryActionsHeading: "Ce qui a été enregistré"
+      tool: "Outil"
     },
+    memoryStored: "+memory",
+    memorySkillStored: "+skill",
+    memoryStoredTitle: "Mémoire enregistrée depuis ce tour",
+    memoryStoredDescription: "La revue en arrière-plan a écrit ceci en mémoire après avoir lu tes messages. Tout dans cette ligne sera rappelé dans les sessions futures.",
+    memoryActionsHeading: "Ce qui a été enregistré"
   },
 
   analytics: {

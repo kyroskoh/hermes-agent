@@ -171,13 +171,13 @@ export const pt: Translations = {
       user: "Utilizador",
       assistant: "Assistente",
       system: "Sistema",
-      tool: "Ferramenta",
-      memoryStored: "+memory",
-      memorySkillStored: "+skill",
-      memoryStoredTitle: "Memória guardada desta turno",
-      memoryStoredDescription: "A revisão em segundo plano escreveu isto na memória depois de ler as tuas mensagens. Tudo nesta linha será lembrado em sessões futuras.",
-      memoryActionsHeading: "O que foi guardado"
+      tool: "Ferramenta"
     },
+    memoryStored: "+memory",
+    memorySkillStored: "+skill",
+    memoryStoredTitle: "Memória guardada desta turno",
+    memoryStoredDescription: "A revisão em segundo plano escreveu isto na memória depois de ler as tuas mensagens. Tudo nesta linha será lembrado em sessões futuras.",
+    memoryActionsHeading: "O que foi guardado"
   },
 
   analytics: {

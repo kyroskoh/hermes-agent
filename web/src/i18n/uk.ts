@@ -171,13 +171,13 @@ export const uk: Translations = {
       user: "Користувач",
       assistant: "Асистент",
       system: "Система",
-      tool: "Інструмент",
-      memoryStored: "+memory",
-      memorySkillStored: "+skill",
-      memoryStoredTitle: "Пам'ять збережено з цього ходу",
-      memoryStoredDescription: "Фонова перевірка записала це в пам'ять після прочитання твоїх повідомлень. Все в цьому рядку буде згадуватися в майбутніх сесіях.",
-      memoryActionsHeading: "Що було збережено"
+      tool: "Інструмент"
     },
+    memoryStored: "+memory",
+    memorySkillStored: "+skill",
+    memoryStoredTitle: "Пам'ять збережено з цього ходу",
+    memoryStoredDescription: "Фонова перевірка записала це в пам'ять після прочитання твоїх повідомлень. Все в цьому рядку буде згадуватися в майбутніх сесіях.",
+    memoryActionsHeading: "Що було збережено"
   },
 
   analytics: {

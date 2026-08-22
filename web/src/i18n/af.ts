@@ -171,13 +171,13 @@ export const af: Translations = {
       user: "Gebruiker",
       assistant: "Assistent",
       system: "Stelsel",
-      tool: "Gereedskap",
-      memoryStored: "+memory",
-      memorySkillStored: "+skill",
-      memoryStoredTitle: "Geheue gestoor vanaf hierdie beurt",
-      memoryStoredDescription: "Die agtergrond-resensie het dit na geheue geskryf nadat dit jou boodskappe gelees het. Alles in hierdie ry sal in toekomstige sessies onthou word.",
-      memoryActionsHeading: "Wat gestoor is"
+      tool: "Gereedskap"
     },
+    memoryStored: "+memory",
+    memorySkillStored: "+skill",
+    memoryStoredTitle: "Geheue gestoor vanaf hierdie beurt",
+    memoryStoredDescription: "Die agtergrond-resensie het dit na geheue geskryf nadat dit jou boodskappe gelees het. Alles in hierdie ry sal in toekomstige sessies onthou word.",
+    memoryActionsHeading: "Wat gestoor is"
   },
 
   analytics: {

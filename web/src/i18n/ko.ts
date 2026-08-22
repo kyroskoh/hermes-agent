@@ -171,13 +171,13 @@ export const ko: Translations = {
       user: "사용자",
       assistant: "어시스턴트",
       system: "시스템",
-      tool: "도구",
-      memoryStored: "+memory",
-      memorySkillStored: "+skill",
-      memoryStoredTitle: "이 턴에서 메모리가 저장됨",
-      memoryStoredDescription: "백그라운드 리뷰가 메시지를 읽은 후 메모리에 작성했습니다. 이 행의 모든 내용은 향후 세션에서 기억됩니다.",
-      memoryActionsHeading: "저장된 내용"
+      tool: "도구"
     },
+    memoryStored: "+memory",
+    memorySkillStored: "+skill",
+    memoryStoredTitle: "이 턴에서 메모리가 저장됨",
+    memoryStoredDescription: "백그라운드 리뷰가 메시지를 읽은 후 메모리에 작성했습니다. 이 행의 모든 내용은 향후 세션에서 기억됩니다.",
+    memoryActionsHeading: "저장된 내용"
   },
 
   analytics: {

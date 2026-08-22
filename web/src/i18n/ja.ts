@@ -171,13 +171,13 @@ export const ja: Translations = {
       user: "ユーザー",
       assistant: "アシスタント",
       system: "システム",
-      tool: "ツール",
-      memoryStored: "+memory",
-      memorySkillStored: "+skill",
-      memoryStoredTitle: "このターンから記憶を保存しました",
-      memoryStoredDescription: "バックグラウンドレビューがあなたのメッセージを読んだ後、メモリに書き込みました。この行のすべての内容は将来のセッションで思い起こされます。",
-      memoryActionsHeading: "保存された内容"
+      tool: "ツール"
     },
+    memoryStored: "+memory",
+    memorySkillStored: "+skill",
+    memoryStoredTitle: "このターンから記憶を保存しました",
+    memoryStoredDescription: "バックグラウンドレビューがあなたのメッセージを読んだ後、メモリに書き込みました。この行のすべての内容は将来のセッションで思い起こされます。",
+    memoryActionsHeading: "保存された内容"
   },
 
   analytics: {

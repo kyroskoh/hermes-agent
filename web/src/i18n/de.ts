@@ -171,13 +171,13 @@ export const de: Translations = {
       user: "Benutzer",
       assistant: "Assistent",
       system: "System",
-      tool: "Werkzeug",
-      memoryStored: "+memory",
-      memorySkillStored: "+skill",
-      memoryStoredTitle: "Speicher aus dieser Runde gespeichert",
-      memoryStoredDescription: "Die Hintergrundprüfung hat dies nach dem Lesen deiner Nachrichten in den Speicher geschrieben. Alles in dieser Zeile wird in zukünftigen Sitzungen erinnert.",
-      memoryActionsHeading: "Was gespeichert wurde"
+      tool: "Werkzeug"
     },
+    memoryStored: "+memory",
+    memorySkillStored: "+skill",
+    memoryStoredTitle: "Speicher aus dieser Runde gespeichert",
+    memoryStoredDescription: "Die Hintergrundprüfung hat dies nach dem Lesen deiner Nachrichten in den Speicher geschrieben. Alles in dieser Zeile wird in zukünftigen Sitzungen erinnert.",
+    memoryActionsHeading: "Was gespeichert wurde"
   },
 
   analytics: {
