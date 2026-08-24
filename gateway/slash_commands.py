@@ -1721,31 +1721,45 @@ class GatewaySlashCommandsMixin:
         """Handle /help command - list available commands."""
         from gateway.run import _telegramize_command_mentions
         from hermes_cli.slash_exec import CommandContext, execute_command
+        from gateway.slash_access import policy_for_source, _ALWAYS_ALLOWED_FOR_USERS
 
-        reply = execute_command("help", CommandContext(surface="gateway"))
+        source = getattr(event, "source", None)
+        policy = policy_for_source(getattr(self, "config", None), source)
+        options: dict[str, Any] = {}
+        if policy.enabled and source and not policy.is_admin(source.user_id):
+            options["allowed_commands"] = set(_ALWAYS_ALLOWED_FOR_USERS) | set(policy.user_allowed_commands)
+
+        reply = execute_command("help", CommandContext(surface="gateway", options=options))
         return _telegramize_command_mentions(
             reply.text,
-            getattr(getattr(event, "source", None), "platform", None),
+            getattr(source, "platform", None),
         )
 
     async def _handle_commands_command(self, event: MessageEvent) -> str:
         from gateway.run import _telegramize_command_mentions
         from hermes_cli.slash_exec import CommandContext, execute_command
         from gateway.config import Platform
+        from gateway.slash_access import policy_for_source, _ALWAYS_ALLOWED_FOR_USERS
 
+        source = getattr(event, "source", None)
+        policy = policy_for_source(getattr(self, "config", None), source)
         # Page size is a surface parameter (Telegram messages are shorter).
-        page_size = 15 if event.source.platform == Platform.TELEGRAM else 20
+        page_size = 15 if source and getattr(source, "platform", None) == Platform.TELEGRAM else 20
+        options: dict[str, Any] = {"page_size": page_size}
+        if policy.enabled and source and not policy.is_admin(source.user_id):
+            options["allowed_commands"] = set(_ALWAYS_ALLOWED_FOR_USERS) | set(policy.user_allowed_commands)
+
         reply = execute_command(
             "commands",
             CommandContext(
                 surface="gateway",
                 args=event.get_command_args(),
-                options={"page_size": page_size},
+                options=options,
             ),
         )
         return _telegramize_command_mentions(
             reply.text,
-            getattr(getattr(event, "source", None), "platform", None),
+            getattr(source, "platform", None),
         )
 
     async def _handle_model_command(self, event: MessageEvent) -> Optional[str]:
