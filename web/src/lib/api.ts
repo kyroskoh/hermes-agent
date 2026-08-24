@@ -84,6 +84,15 @@ const PROFILE_SCOPED_PREFIXES = [
   "/api/model/auxiliary",
   "/api/model/moa",
   "/api/model/options",
+  // FORK: kyroskoh/hermes-agent — fallback chain CRUD endpoints added so
+  // the FallbackPage can manage the chain under the active management
+  // profile. Mirrors the prefix shape of /api/model/set above.
+  "/api/model/fallback",
+  // FORK: kyroskoh/hermes-agent — personality knob CRUD endpoints added
+  // so the PersonalityPage can tune per-profile persona percentages
+  // (memory_recall, future: clinginess, cheerfulness, ...) under the
+  // active management profile.
+  "/api/personality",
   // A named profile keeps its own pairing whitelist, and its gateway only
   // consults that one — approving into the global store would grant access
   // the running gateway never sees.
@@ -563,6 +572,107 @@ export const api = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       },
+    ),
+  // FORK: kyroskoh/hermes-agent — fallback provider chain CRUD. Backed by
+  // the /api/model/fallback endpoints added to hermes_cli/web_server.py.
+  // These wrap the existing hermes_cli.fallback_config helpers so the
+  // runtime consumer (agent_runtime_helpers._try_activate_fallback) sees
+  // the same chain regardless of how it was edited.
+  getFallbackChain: (profile = getManagementProfile()) =>
+    fetchJSON<FallbackChainResponse>(
+      appendProfileParam("/api/model/fallback", profile),
+    ),
+  getFallbackStatus: (profile = getManagementProfile()) =>
+    fetchJSON<FallbackChainStatusResponse>(
+      appendProfileParam("/api/model/fallback/status", profile),
+    ),
+  setFallbackChain: (
+    chain: FallbackEntryPayload[],
+    profile = getManagementProfile(),
+  ) =>
+    fetchJSON<FallbackChainMutationResponse>(
+      appendProfileParam("/api/model/fallback", profile),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chain }),
+      },
+    ),
+  appendFallbackEntry: (
+    entry: FallbackEntryPayload,
+    profile = getManagementProfile(),
+  ) =>
+    fetchJSON<FallbackChainMutationResponse>(
+      appendProfileParam("/api/model/fallback/append", profile),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(entry),
+      },
+    ),
+  removeFallbackEntry: (index: number, profile = getManagementProfile()) =>
+    fetchJSON<FallbackChainMutationResponse>(
+      appendProfileParam(
+        `/api/model/fallback/${encodeURIComponent(String(index))}`,
+        profile,
+      ),
+      { method: "DELETE" },
+    ),
+  getOrchestratorStatus: () =>
+    fetchJSON<{ state: any; current_config_primary: any }>("/api/model/orchestrator"),
+  toggleOrchestrator: (enabled: boolean) =>
+    fetchJSON<{ ok: boolean; auto_promote_enabled: boolean }>(
+      "/api/model/orchestrator/toggle",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      },
+    ),
+  evaluateOrchestrator: () =>
+    fetchJSON<any>("/api/model/orchestrator/evaluate", { method: "POST" }),
+  clearFallbackChain: (profile = getManagementProfile()) =>
+    fetchJSON<{ ok: boolean; removed: number; chain: FallbackEntryPayload[] }>(
+      appendProfileParam("/api/model/fallback", profile),
+      { method: "DELETE" },
+    ),
+  reorderFallbackChain: (
+    chain: FallbackEntryPayload[],
+    profile = getManagementProfile(),
+  ) =>
+    fetchJSON<FallbackChainMutationResponse>(
+      appendProfileParam("/api/model/fallback/reorder", profile),
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chain }),
+      },
+    ),
+  // FORK: kyroskoh/hermes-agent — personality knob CRUD. Backed by the
+  // /api/personality endpoints added to hermes_cli/web_server.py. These
+  // let the PersonalityPage tune per-profile persona percentages
+  // (memory_recall + future knobs) without a shell.
+  getPersonality: (profile = getManagementProfile()) =>
+    fetchJSON<PersonalityKnobsResponse>(
+      appendProfileParam("/api/personality", profile),
+    ),
+  setPersonalityKnob: (
+    name: string,
+    value: number,
+    profile = getManagementProfile(),
+  ) =>
+    fetchJSON<PersonalityKnob>(
+      appendProfileParam(`/api/personality/${encodeURIComponent(name)}`, profile),
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value }),
+      },
+    ),
+  resetPersonalityKnob: (name: string, profile = getManagementProfile()) =>
+    fetchJSON<PersonalityKnob>(
+      appendProfileParam(`/api/personality/${encodeURIComponent(name)}`, profile),
+      { method: "DELETE" },
     ),
   saveConfig: (config: Record<string, unknown>, profile = getManagementProfile()) =>
     fetchJSON<{ ok: boolean }>(appendProfileParam("/api/config", profile), {
@@ -2502,6 +2612,96 @@ export interface ModelAssignmentResponse {
    *  Switching main never clears aux pins; this lets the UI warn the user
    *  their helper tasks aren't following the switch. Only set on scope:'main'. */
   stale_aux?: StaleAuxAssignment[];
+}
+
+// FORK: kyroskoh/hermes-agent — fallback provider chain types. Match the
+// response shape returned by /api/model/fallback in hermes_cli/web_server.py.
+
+export interface FallbackEntryPayload {
+  provider: string;
+  model: string;
+  base_url?: string;
+}
+
+export interface FallbackChainTriggers {
+  rate_limit: boolean;
+  upstream_429: boolean;
+  five_xx: boolean;
+  connection: boolean;
+  auth: boolean;
+}
+
+export interface FallbackChainResponse {
+  primary: {
+    provider: string;
+    model: string;
+    base_url: string;
+  };
+  chain: FallbackEntryPayload[];
+  triggers: FallbackChainTriggers;
+}
+
+export interface FallbackChainMutationResponse {
+  ok: boolean;
+  count?: number;
+  removed?: number;
+  chain?: FallbackEntryPayload[];
+}
+
+// FORK: kyroskoh/hermes-agent — smart-fallback status surface.
+// Response shape returned by GET /api/model/fallback/status.
+
+export interface FallbackProviderStatus {
+  state?: string;
+  total_usable_credits?: number | null;
+  subscription_credits_remaining?: number | null;
+  purchased_credits_remaining?: number | null;
+  monthly_credits?: number | null;
+  is_free_tier?: boolean | null;
+  paid_service_access?: boolean | null;
+  details?: string;
+  credentials?: Array<{
+    id?: string;
+    exhausted_until?: number;
+    is_quarantined?: boolean;
+    has_reset_at?: boolean;
+  }>;
+}
+
+export interface FallbackChainStatusCache {
+  ok: boolean;
+  cache_path: string;
+  refreshed_at: string | null;
+  ttl_seconds: number | null;
+  age_seconds: number | null;
+  providers: Record<string, FallbackProviderStatus>;
+}
+
+export interface FallbackChainStatusResponse {
+  primary: { provider: string; model: string; base_url: string };
+  chain: Array<FallbackEntryPayload & { skip_reason?: string | null }>;
+  cache: FallbackChainStatusCache;
+}
+
+// FORK: kyroskoh/hermes-agent — personality knob types. Match the
+// response shape returned by /api/personality in hermes_cli/web_server.py.
+// Each knob is a 0–100 percentage with an operator-tunable override that
+// falls back to the factory default when unset.
+
+export interface PersonalityKnob {
+  name: string;
+  label: string;
+  description: string;
+  value: number;
+  default: number;
+  min: number;
+  max: number;
+  is_default: boolean;
+}
+
+export interface PersonalityKnobsResponse {
+  profile: string;
+  knobs: PersonalityKnob[];
 }
 
 // ── OAuth provider types ────────────────────────────────────────────────

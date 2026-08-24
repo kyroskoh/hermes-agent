@@ -7963,6 +7963,719 @@ def _denormalize_config_from_web(config: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
+# ---------------------------------------------------------------------------
+# Fallback provider chain — REST surface for the dashboard
+#
+# FORK: kyroskoh/hermes-agent — exposes the existing
+# hermes_cli.fallback_config.get_fallback_chain() chain over HTTP so the fork
+# FallbackPage can render, add, remove, reorder, and clear entries without a
+# shell. The underlying CLI (`hermes fallback add|remove|list|clear`) and the
+# runtime consumer (agent_runtime_helpers.py:_try_activate_fallback) are
+# upstream-owned and unchanged — this block only wraps the config side.
+#
+# Triggers (verified in agent/agent_runtime_helpers.py:1075):
+#   - HTTP 429 (rate-limit) from primary → walk the chain in order
+#   - HTTP 5xx / connection errors → same
+#   - The chain auto-resets to primary on the next turn, so a brief blip
+#     doesn't permanently knock the user off their preferred model.
+#
+# Storage: top-level ``fallback_providers:`` list in ~/.hermes/config.yaml.
+# Legacy ``fallback_model:`` dict is merged in by get_fallback_chain() and
+# migrated on first write.
+# ---------------------------------------------------------------------------
+
+
+class FallbackEntry(BaseModel):
+    """One row in the fallback chain."""
+
+    provider: str
+    model: str
+    base_url: str = ""
+
+
+class FallbackChainUpdate(BaseModel):
+    """Full replace payload for POST /api/model/fallback."""
+
+    chain: list[FallbackEntry]
+
+
+@app.get("/api/model/fallback")
+async def get_fallback_chain_endpoint(profile: Optional[str] = None):
+    """Return the effective fallback chain and the resolved primary model.
+
+    Response shape::
+
+        {
+          "primary": {"provider": "minimax-oauth", "model": "MiniMax-M3", "base_url": "..."},
+          "chain":   [{"provider": "...", "model": "...", "base_url": "...", "skip_reason": null|"..."}, ...],
+          "triggers": {
+            "rate_limit":    true,   # HTTP 429 → fallback
+            "upstream_429":  true,   # aggregator-side 429 (deferred to chain)
+            "five_xx":       true,   # 500/502/503/504 → fallback
+            "connection":    true,   # network errors → fallback
+            "auth":          false   # 401/403 → credential rotation, NOT fallback
+          }
+        }
+
+    Each entry's ``skip_reason`` is computed from the smart-fallback cache
+    (Nous out of credits, Codex credential in cooldown, etc.) — a non-null
+    value means the runtime will skip this entry at fallback time. For the
+    full cache snapshot (refreshed_at, age_seconds, all providers), see
+    ``GET /api/model/fallback/status``.
+    """
+    try:
+        from hermes_cli.fallback_config import get_fallback_chain
+
+        def _read() -> dict[str, Any]:
+            with _profile_scope(profile):
+                cfg = load_config()
+            chain = get_fallback_chain(cfg)
+
+            # Resolved primary: model.{provider,default,base_url}
+            model_cfg = cfg.get("model") or {}
+            if isinstance(model_cfg, dict):
+                primary_provider = (model_cfg.get("provider") or "").strip()
+                primary_model = (
+                    model_cfg.get("default")
+                    or model_cfg.get("model")
+                    or ""
+                ).strip()
+                primary_base_url = (model_cfg.get("base_url") or "").strip()
+            else:
+                primary_provider = ""
+                primary_model = str(model_cfg or "").strip()
+                primary_base_url = ""
+
+            # Annotate chain with skip reasons from the smart-fallback cache.
+            # The helper module is optional — fall back to un-annotated chain
+            # if it's not importable (e.g. operator hasn't installed yet).
+            try:
+                import sys as _sys
+                _sys.path.insert(0, "/root/.hermes/scripts")
+                from fallback_smart_skip import annotate_chain  # type: ignore
+                annotated = annotate_chain(chain)
+            except Exception:
+                annotated = [{**e, "skip_reason": None} for e in chain]
+
+            return {
+                "primary": {
+                    "provider": primary_provider,
+                    "model": primary_model,
+                    "base_url": primary_base_url,
+                },
+                "chain": annotated,
+                "triggers": {
+                    "rate_limit": True,
+                    "upstream_429": True,
+                    "five_xx": True,
+                    "connection": True,
+                    "auth": False,
+                },
+            }
+
+        return await asyncio.to_thread(_read)
+    except HTTPException:
+        raise
+    except Exception:
+        _log.exception("GET /api/model/fallback failed")
+        raise HTTPException(
+            status_code=500, detail="Failed to read fallback chain"
+        )
+
+
+@app.post("/api/model/fallback")
+async def set_fallback_chain_endpoint(
+    body: FallbackChainUpdate, profile: Optional[str] = None
+):
+    """Replace the entire fallback chain. Deduplicates by (provider, model, base_url)."""
+
+    def _apply() -> dict[str, Any]:
+        from hermes_cli.fallback_config import get_fallback_chain
+
+        with _profile_scope(profile):
+            cfg = load_config()
+
+        # Validate + dedupe. Preserve order from the request.
+        seen: set[tuple[str, str, str]] = set()
+        cleaned: list[dict[str, Any]] = []
+        for entry in body.chain:
+            provider = (entry.provider or "").strip()
+            model = (entry.model or "").strip()
+            base_url = (entry.base_url or "").strip()
+            if not provider or not model:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Every fallback entry must have both provider and model",
+                )
+            identity = (provider.lower(), model.lower(), base_url.rstrip("/").lower())
+            if identity in seen:
+                continue
+            seen.add(identity)
+            row: dict[str, Any] = {"provider": provider, "model": model}
+            if base_url:
+                row["base_url"] = base_url
+            cleaned.append(row)
+
+        cfg["fallback_providers"] = cleaned
+        # Drop legacy key for single source of truth.
+        if "fallback_model" in cfg:
+            cfg.pop("fallback_model", None)
+        save_config(cfg)
+
+        return {
+            "ok": True,
+            "count": len(cleaned),
+            "chain": get_fallback_chain(cfg),
+        }
+
+    try:
+        return await asyncio.to_thread(_apply)
+    except HTTPException:
+        raise
+    except Exception:
+        _log.exception("POST /api/model/fallback failed")
+        raise HTTPException(
+            status_code=500, detail="Failed to save fallback chain"
+        )
+
+
+@app.post("/api/model/fallback/append")
+async def append_fallback_entry_endpoint(
+    entry: FallbackEntry, profile: Optional[str] = None
+):
+    """Append one entry to the end of the chain (preserves existing order).
+
+    Rejects exact duplicates (same provider+model+base_url). Refuses to add
+    the currently-configured primary — that would be a no-op fallback.
+    """
+
+    def _apply() -> dict[str, Any]:
+        from hermes_cli.fallback_config import get_fallback_chain
+
+        with _profile_scope(profile):
+            cfg = load_config()
+
+        provider = (entry.provider or "").strip()
+        model = (entry.model or "").strip()
+        base_url = (entry.base_url or "").strip()
+        if not provider or not model:
+            raise HTTPException(
+                status_code=400,
+                detail="provider and model are required",
+            )
+
+        # Refuse to add the primary. Match on (provider, model) — base_url
+        # is intentionally NOT part of the identity for primary detection,
+        # because the primary may carry a base_url but a user typing
+        # "minimax-oauth / MiniMax-M3" with an empty base_url is still
+        # attempting to add the primary.
+        model_cfg = cfg.get("model") or {}
+        if isinstance(model_cfg, dict):
+            primary_provider = (model_cfg.get("provider") or "").strip().lower()
+            primary_model = (
+                model_cfg.get("default") or model_cfg.get("model") or ""
+            ).strip().lower()
+        else:
+            primary_provider = ""
+            primary_model = str(model_cfg or "").strip().lower()
+
+        if (
+            provider.lower() == primary_provider
+            and model.lower() == primary_model
+            and primary_provider  # only enforce when we actually resolved a primary
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="That provider/model is your primary — it cannot also be a fallback.",
+            )
+
+        chain = get_fallback_chain(cfg)
+        for existing in chain:
+            existing_provider = (
+                str(existing.get("provider") or "").strip().lower()
+            )
+            existing_model = (
+                str(existing.get("model") or "").strip().lower()
+            )
+            existing_base_url = (
+                str(existing.get("base_url") or "")
+                .strip()
+                .rstrip("/")
+                .lower()
+            )
+            if (
+                existing_provider == provider.lower()
+                and existing_model == model.lower()
+                and existing_base_url == base_url.rstrip("/").lower()
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="That entry already exists in the chain.",
+                )
+
+        new_row: dict[str, Any] = {"provider": provider, "model": model}
+        if base_url:
+            new_row["base_url"] = base_url
+        chain.append(new_row)
+
+        cfg["fallback_providers"] = chain
+        if "fallback_model" in cfg:
+            cfg.pop("fallback_model", None)
+        save_config(cfg)
+
+        return {"ok": True, "count": len(chain), "chain": chain}
+
+    try:
+        return await asyncio.to_thread(_apply)
+    except HTTPException:
+        raise
+    except Exception:
+        _log.exception("POST /api/model/fallback/append failed")
+        raise HTTPException(
+            status_code=500, detail="Failed to append fallback entry"
+        )
+
+
+@app.delete("/api/model/fallback")
+async def clear_fallback_chain_endpoint(profile: Optional[str] = None):
+    """Clear the entire chain."""
+
+    def _apply() -> dict[str, Any]:
+        with _profile_scope(profile):
+            cfg = load_config()
+        removed = len(cfg.get("fallback_providers") or []) + (
+            1 if isinstance(cfg.get("fallback_model"), dict) else 0
+        )
+        cfg.pop("fallback_providers", None)
+        cfg.pop("fallback_model", None)
+        save_config(cfg)
+        return {"ok": True, "removed": removed, "chain": []}
+
+    try:
+        return await asyncio.to_thread(_apply)
+    except HTTPException:
+        raise
+    except Exception:
+        _log.exception("DELETE /api/model/fallback failed")
+        raise HTTPException(
+            status_code=500, detail="Failed to clear fallback chain"
+        )
+
+
+@app.delete("/api/model/fallback/{index}")
+async def remove_fallback_entry_endpoint(
+    index: int, profile: Optional[str] = None
+):
+    """Remove the chain entry at ``index`` (0-based)."""
+
+    def _apply() -> dict[str, Any]:
+        from hermes_cli.fallback_config import get_fallback_chain
+
+        with _profile_scope(profile):
+            cfg = load_config()
+        chain = get_fallback_chain(cfg)
+        if index < 0 or index >= len(chain):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Index {index} out of range (chain has {len(chain)} entries)",
+            )
+        chain.pop(index)
+        cfg["fallback_providers"] = chain
+        if "fallback_model" in cfg:
+            cfg.pop("fallback_model", None)
+        save_config(cfg)
+        return {"ok": True, "count": len(chain), "chain": chain}
+
+    try:
+        return await asyncio.to_thread(_apply)
+    except HTTPException:
+        raise
+    except Exception:
+        _log.exception("DELETE /api/model/fallback/{index} failed")
+        raise HTTPException(
+            status_code=500, detail="Failed to remove fallback entry"
+        )
+
+
+@app.put("/api/model/fallback/reorder")
+async def reorder_fallback_chain_endpoint(
+    body: FallbackChainUpdate, profile: Optional[str] = None
+):
+    """Replace the chain in the supplied order. Same validation as POST.
+
+    Separate endpoint from POST /api/model/fallback so the UI can name the
+    intent clearly (drag-reorder vs. full replace). Behaviorally identical.
+    """
+
+    return await set_fallback_chain_endpoint(body, profile=profile)
+
+
+# FORK: kyroskoh/hermes-agent — smart-fallback runtime + status surface.
+#
+# Imports the operator-side helper at /root/.hermes/scripts/fallback_smart_skip.py
+# which wraps agent.chat_completion_helpers._fallback_entry_unavailable_without_network
+# so the runtime skips fallback entries our smart cache knows are unavailable
+# (Nous out of credits, Codex credential in cooldown) BEFORE burning a
+# network round-trip. Also exposes get_status_snapshot() + annotate_chain()
+# for the /api/model/fallback/status endpoint and the FallbackPage UI.
+#
+# Install is idempotent — safe to call on every web_server startup.
+try:
+    import sys as _sys
+    _sys.path.insert(0, "/root/.hermes/scripts")
+    from fallback_smart_skip import install_smart_skip_hook  # type: ignore
+    install_smart_skip_hook()
+except Exception as _exc:
+    _log.warning("[smart-fallback] install hook failed: %s", _exc)
+
+
+@app.get("/api/model/fallback/status")
+async def get_fallback_status_endpoint(profile: Optional[str] = None):
+    """Return the smart-fallback provider status snapshot + per-entry skip
+    reasons computed against the current chain.
+
+    Response shape::
+
+        {
+          "primary": {...},                            // same as /api/model/fallback
+          "chain":  [{..., "skip_reason": "..."}],     // current chain with smart-skip annotations
+          "cache":  {                                  // raw cache snapshot
+            "ok": true,
+            "cache_path": "/root/.hermes/cache/fallback_status.json",
+            "refreshed_at": "2026-08-24T...",
+            "ttl_seconds": 300,
+            "age_seconds": 92,
+            "providers": { "nous": {...}, "openai-codex": {...} }
+          }
+        }
+
+    The operator-side cron (``hermes-fallback-status.py``) writes the cache
+    every 5 minutes; this endpoint just reads it. If the cache is missing
+    or stale (age > 2x TTL), ``cache.ok`` is ``false`` and every entry's
+    ``skip_reason`` is ``null`` (defensive: the runtime should still walk
+    the chain in that case).
+    """
+    try:
+        import sys as _sys
+        _sys.path.insert(0, "/root/.hermes/scripts")
+        from fallback_smart_skip import (  # type: ignore
+            annotate_chain,
+            get_status_snapshot,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Smart-fallback helper unavailable: {exc}",
+        )
+
+    def _read() -> dict[str, Any]:
+        from hermes_cli.fallback_config import get_fallback_chain
+
+        with _profile_scope(profile):
+            cfg = load_config()
+        chain = get_fallback_chain(cfg)
+
+        # Resolved primary (same shape as /api/model/fallback).
+        model_cfg = cfg.get("model") or {}
+        if isinstance(model_cfg, dict):
+            primary = {
+                "provider": (model_cfg.get("provider") or "").strip(),
+                "model": (
+                    model_cfg.get("default") or model_cfg.get("model") or ""
+                ).strip(),
+                "base_url": (model_cfg.get("base_url") or "").strip(),
+            }
+        else:
+            primary = {
+                "provider": "",
+                "model": str(model_cfg or "").strip(),
+                "base_url": "",
+            }
+
+        return {
+            "primary": primary,
+            "chain": annotate_chain(chain),
+            "cache": get_status_snapshot(),
+        }
+
+    try:
+        return await asyncio.to_thread(_read)
+    except HTTPException:
+        raise
+    except Exception:
+        _log.exception("GET /api/model/fallback/status failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to read fallback status",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Model Orchestrator REST endpoints (FORK: kyroskoh/hermes-agent)
+# ---------------------------------------------------------------------------
+
+class OrchestratorToggle(BaseModel):
+    enabled: bool
+
+
+class OrchestratorTargetUpdate(BaseModel):
+    provider: str
+    model: str
+    base_url: Optional[str] = ""
+
+
+@app.get("/api/model/orchestrator")
+async def get_orchestrator_status_endpoint():
+    """Return live status of the model orchestrator and auto-promotion engine."""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, "/root/.hermes/scripts")
+        from auto_promote_orchestrator import (  # type: ignore
+            load_orchestrator_state,
+            read_current_config_primary,
+            evaluate_and_orchestrate,
+        )
+
+        def _run():
+            state = load_orchestrator_state()
+            current = read_current_config_primary()
+            return {
+                "state": state,
+                "current_config_primary": current,
+            }
+
+        return await asyncio.to_thread(_run)
+    except Exception as exc:
+        _log.exception("GET /api/model/orchestrator failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/model/orchestrator/toggle")
+async def toggle_orchestrator_endpoint(body: OrchestratorToggle):
+    """Enable or disable auto-promotion in the orchestrator."""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, "/root/.hermes/scripts")
+        from auto_promote_orchestrator import (  # type: ignore
+            load_orchestrator_state,
+            save_orchestrator_state,
+        )
+
+        def _toggle():
+            state = load_orchestrator_state()
+            state["auto_promote_enabled"] = bool(body.enabled)
+            save_orchestrator_state(state)
+            return {"ok": True, "auto_promote_enabled": state["auto_promote_enabled"]}
+
+        return await asyncio.to_thread(_toggle)
+    except Exception as exc:
+        _log.exception("POST /api/model/orchestrator/toggle failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/model/orchestrator/target")
+async def update_orchestrator_target_endpoint(body: OrchestratorTargetUpdate):
+    """Set the preferred target primary model."""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, "/root/.hermes/scripts")
+        from auto_promote_orchestrator import (  # type: ignore
+            load_orchestrator_state,
+            save_orchestrator_state,
+        )
+
+        def _update():
+            state = load_orchestrator_state()
+            state["target_primary"] = {
+                "provider": body.provider.strip(),
+                "model": body.model.strip(),
+                "base_url": (body.base_url or "").strip(),
+            }
+            save_orchestrator_state(state)
+            return {"ok": True, "target_primary": state["target_primary"]}
+
+        return await asyncio.to_thread(_update)
+    except Exception as exc:
+        _log.exception("POST /api/model/orchestrator/target failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/model/orchestrator/evaluate")
+async def evaluate_orchestrator_endpoint():
+    """Trigger an immediate evaluation and promotion/demotion pass."""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, "/root/.hermes/scripts")
+        from auto_promote_orchestrator import evaluate_and_orchestrate  # type: ignore
+
+        return await asyncio.to_thread(evaluate_and_orchestrate, True)
+    except Exception as exc:
+        _log.exception("POST /api/model/orchestrator/evaluate failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Personality knobs — REST surface for the dashboard
+#
+# FORK: kyroskoh/hermes-agent — exposes the operator-tunable persona
+# percentages registered in hermes_cli.personality_knobs.REGISTRY so the
+# fork PersonalityPage can list, set, and reset knobs without a shell.
+# Mirrors the /api/model/fallback shape (profile-scoped GET + per-knob
+# PUT + reset). The runtime consumer is agent.prompt_builder.load_soul_md,
+# which appends the live values to every injected SOUL.md (idempotent via
+# strip_soul_footer).
+# ---------------------------------------------------------------------------
+
+
+class PersonalityKnobUpdate(BaseModel):
+    """One knob update payload."""
+
+    value: int
+
+
+class PersonalityKnobReset(BaseModel):
+    """Empty body — explicit shape so the frontend can wire a button."""
+
+    pass
+
+
+@app.get("/api/personality")
+async def get_personality_endpoint(profile: Optional[str] = None):
+    """Return every registered knob + its effective value.
+
+    Response shape::
+
+        {
+          "profile": "wilnice",   # empty string when unscoped
+          "knobs": [
+            {
+              "name":        "memory_recall",
+              "label":       "Memory recall",
+              "description": "...",
+              "value":       75,
+              "default":     75,
+              "min":         0,
+              "max":         100,
+              "is_default":  false,   # True when no override is set
+            },
+            ...
+          ]
+        }
+    """
+    try:
+        from hermes_cli.personality_knobs import resolve_knobs
+
+        def _read() -> dict[str, Any]:
+            with _profile_scope(profile):
+                cfg = load_config()
+            return {
+                "profile": (profile or "").strip(),
+                "knobs": list(resolve_knobs(cfg).values()),
+            }
+
+        return await asyncio.to_thread(_read)
+    except HTTPException:
+        raise
+    except Exception:
+        _log.exception("GET /api/personality failed")
+        raise HTTPException(
+            status_code=500, detail="Failed to read personality knobs"
+        )
+
+
+@app.put("/api/personality/{name}")
+async def set_personality_knob_endpoint(
+    name: str,
+    body: PersonalityKnobUpdate,
+    profile: Optional[str] = None,
+):
+    """Set *name* to *body.value* (clamped).
+
+    Returns the resolved knob (same shape as a single entry from the list
+    endpoint) so the frontend can update its UI without a follow-up GET.
+    """
+    try:
+        from hermes_cli.personality_knobs import (
+            get_knob,
+            resolve_knobs,
+            set_knob,
+        )
+
+        def _apply() -> dict[str, Any]:
+            try:
+                knob = get_knob(name)
+            except KeyError as exc:
+                raise HTTPException(
+                    status_code=404,
+                    detail=str(exc),
+                )
+            try:
+                clamped = knob.coerce(body.value)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400, detail=str(exc)
+                )
+            with _profile_scope(profile):
+                cfg = load_config()
+                set_knob(cfg, knob.name, clamped)
+                save_config(cfg)
+            # Re-resolve so the response reflects the post-save state,
+            # including any schema-derived fields.
+            with _profile_scope(profile):
+                cfg = load_config()
+            return resolve_knobs(cfg)[knob.name]
+
+        return await asyncio.to_thread(_apply)
+    except HTTPException:
+        raise
+    except Exception:
+        _log.exception("PUT /api/personality/%s failed", name)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to set personality knob {name}"
+        )
+
+
+@app.delete("/api/personality/{name}")
+async def reset_personality_knob_endpoint(
+    name: str, profile: Optional[str] = None
+):
+    """Reset *name* to its factory default. Idempotent."""
+    try:
+        from hermes_cli.personality_knobs import (
+            get_knob,
+            resolve_knobs,
+            unset_knob,
+        )
+
+        def _apply() -> dict[str, Any]:
+            try:
+                knob = get_knob(name)
+            except KeyError as exc:
+                raise HTTPException(
+                    status_code=404,
+                    detail=str(exc),
+                )
+            with _profile_scope(profile):
+                cfg = load_config()
+                removed = unset_knob(cfg, knob.name)
+                if removed:
+                    save_config(cfg)
+            with _profile_scope(profile):
+                cfg = load_config()
+            entry = resolve_knobs(cfg)[knob.name]
+            entry["reset"] = removed  # type: ignore[typeddict-item]
+            return entry
+
+        return await asyncio.to_thread(_apply)
+    except HTTPException:
+        raise
+    except Exception:
+        _log.exception("DELETE /api/personality/%s failed", name)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to reset personality knob {name}"
+        )
+
+
 @app.put("/api/config")
 async def update_config(body: ConfigUpdate, profile: Optional[str] = None):
     def _run():

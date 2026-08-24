@@ -109,6 +109,8 @@ class ConversationState:
     ephemeral_pin: Optional[Tuple[Any, ...]] = None
     # Last voice-channel context delivered (None = never delivered).
     vc_last: Optional[str] = None
+    # Last fallback notice emitted (dedupes repeat status lines across turns).
+    last_fallback_notice: Optional[str] = None
 
     def clear(self) -> None:
         """Reset every conversation-scoped field to its default.
@@ -126,6 +128,7 @@ class ConversationState:
         self.sidecar_notes = []
         self.ephemeral_pin = None
         self.vc_last = None
+        self.last_fallback_notice = None
 
 
 @dataclass
