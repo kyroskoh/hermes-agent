@@ -17,6 +17,11 @@ import { useForkI18n } from "@/fork/i18n/useForkI18n";
 
 export default function BackupsPage() {
   const { backups: t } = useForkI18n();
+  // Schema-bumped 2026-08-24 to flush any stale browser caches that
+  // were holding a pre-fork BackupsPage bundle (the older launcher
+  // page had different card content). Surfaced as a data attribute so
+  // a future inspector can see which version rendered.
+  const SCHEMA_VERSION = "2";
 
   const tiers = [
     {
@@ -46,7 +51,7 @@ export default function BackupsPage() {
   ] as const;
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="space-y-6 p-6" data-backups-schema={SCHEMA_VERSION}>
       <header className="space-y-2">
         <h1 className="text-3xl font-semibold tracking-tight">{t.title}</h1>
         <p className="text-muted-foreground max-w-3xl text-sm">{t.intro}</p>
