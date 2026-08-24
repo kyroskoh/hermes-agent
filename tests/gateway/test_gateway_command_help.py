@@ -63,3 +63,80 @@ async def test_commands_sanitizes_slash_command_mentions_for_telegram(monkeypatc
     assert "`/Linear`" not in result
 
 
+@pytest.mark.asyncio
+async def test_help_filters_for_gated_non_admin_user():
+    """Non-admin user only sees allowed commands and always-allowed floor in /help."""
+    from gateway.config import GatewayConfig, PlatformConfig
+
+    runner = _make_runner()
+    runner.config = GatewayConfig(
+        platforms={
+            Platform.WHATSAPP: PlatformConfig(
+                enabled=True,
+                extra={
+                    "allow_admin_from": ["admin-1"],
+                    "user_allowed_commands": ["status", "new", "reset"],
+                },
+            )
+        }
+    )
+
+    event = MessageEvent(
+        text="/help",
+        source=SessionSource(
+            platform=Platform.WHATSAPP,
+            chat_id="chat-1",
+            user_id="user-1",
+            user_name="regular_user",
+            chat_type="dm",
+        ),
+    )
+
+    result = await runner._handle_help_command(event)
+    assert "/status" in result
+    assert "/new" in result
+    assert "/help" in result
+    assert "/whoami" in result
+    # Admin-only / unlisted commands must NOT appear
+    assert "/save" not in result
+    assert "/rollback" not in result
+    assert "/diff" not in result
+    assert "/approvals" not in result
+
+
+@pytest.mark.asyncio
+async def test_help_shows_all_for_admin_user():
+    """Admin user sees full command registry in /help."""
+    from gateway.config import GatewayConfig, PlatformConfig
+
+    runner = _make_runner()
+    runner.config = GatewayConfig(
+        platforms={
+            Platform.WHATSAPP: PlatformConfig(
+                enabled=True,
+                extra={
+                    "allow_admin_from": ["admin-1"],
+                    "user_allowed_commands": ["status"],
+                },
+            )
+        }
+    )
+
+    event = MessageEvent(
+        text="/help",
+        source=SessionSource(
+            platform=Platform.WHATSAPP,
+            chat_id="chat-1",
+            user_id="admin-1",
+            user_name="admin_user",
+            chat_type="dm",
+        ),
+    )
+
+    result = await runner._handle_help_command(event)
+    assert "/status" in result
+    assert "/save" in result
+    assert "/rollback" in result
+    assert "/approvals" in result
+
+

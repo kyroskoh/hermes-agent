@@ -618,18 +618,28 @@ def _requires_argument(args_hint: str) -> bool:
     return args_hint.strip().startswith("<")
 
 
-def gateway_help_lines() -> list[str]:
-    """Generate gateway help text lines from the registry."""
+def gateway_help_lines(allowed_commands: set[str] | frozenset[str] | None = None) -> list[str]:
+    """Generate gateway help text lines from the registry.
+
+    If ``allowed_commands`` is provided (e.g. for non-admin gateway users),
+    only commands matching a canonical name or alias in the set are included.
+    """
     overrides = _resolve_config_gates()
     lines: list[str] = []
     for cmd in COMMAND_REGISTRY:
         if not _is_gateway_available(cmd, overrides):
             continue
+        if allowed_commands is not None:
+            names = {cmd.name, *cmd.aliases}
+            if not (names & set(allowed_commands)):
+                continue
         args = f" {cmd.args_hint}" if cmd.args_hint else ""
         alias_parts: list[str] = []
         for a in cmd.aliases:
             # Skip internal aliases like reload_mcp (underscore variant)
             if a.replace("-", "_") == cmd.name.replace("-", "_") and a != cmd.name:
+                continue
+            if allowed_commands is not None and a not in allowed_commands:
                 continue
             alias_parts.append(f"`/{a}`")
         alias_note = f" (alias: {', '.join(alias_parts)})" if alias_parts else ""
