@@ -6,6 +6,7 @@ import {
   BarChart3,
   Brain,
   Cpu,
+  Globe2,
   RefreshCw,
   TrendingUp,
 } from "lucide-react";
@@ -14,6 +15,7 @@ import type {
   AnalyticsResponse,
   AnalyticsDailyEntry,
   AnalyticsModelEntry,
+  AnalyticsProviderEntry,
   AnalyticsSkillEntry,
 } from "@/lib/api";
 import { timeAgo } from "@/lib/utils";
@@ -297,6 +299,13 @@ function ModelTable({ models }: { models: AnalyticsModelEntry[] }) {
 
   if (models.length === 0) return null;
 
+  // FORK: kyroskoh/hermes-agent — backend now groups by (model,
+  // billing_provider) so we render the provider as a second column.
+  // The provider string is empty for legacy/unassigned rows.
+  const hasProviders = models.some((m) => m.billing_provider);
+  const providerLabel = t.analytics.provider ?? "Provider";
+  const unassignedLabel = t.analytics.unassigned ?? "(unassigned)";
+
   return (
     <Card>
       <CardHeader>
@@ -313,6 +322,9 @@ function ModelTable({ models }: { models: AnalyticsModelEntry[] }) {
             <thead>
               <tr className="border-b border-border text-muted-foreground text-xs">
                 <SortHeader label={t.analytics.model} col="model" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-left py-2 pr-4 font-medium" />
+                {hasProviders && (
+                  <SortHeader label={providerLabel} col="billing_provider" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-left py-2 pr-4 font-medium" />
+                )}
                 <SortHeader label={t.sessions.title} col="sessions" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
                 <SortHeader label={t.analytics.tokens} col="input_tokens" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 pl-4 font-medium" />
               </tr>
@@ -320,12 +332,19 @@ function ModelTable({ models }: { models: AnalyticsModelEntry[] }) {
             <tbody>
               {sorted.map((m) => (
                 <tr
-                  key={m.model}
+                  key={`${m.model}::${m.billing_provider ?? ""}`}
                   className="border-b border-border/50 hover:bg-secondary/20 transition-colors"
                 >
                   <td className="py-2 pr-4">
                     <span className="font-mono-ui text-xs">{m.model}</span>
                   </td>
+                  {hasProviders && (
+                    <td className="py-2 pr-4 text-muted-foreground">
+                      <span className="font-mono-ui text-xs">
+                        {m.billing_provider || unassignedLabel}
+                      </span>
+                    </td>
+                  )}
                   <td className="text-right py-2 px-4 text-muted-foreground">
                     {m.sessions}
                   </td>
@@ -336,6 +355,89 @@ function ModelTable({ models }: { models: AnalyticsModelEntry[] }) {
                     {" / "}
                     <span style={{ color: "var(--series-output-token)" }}>
                       {formatTokens(m.output_tokens)}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// FORK: kyroskoh/hermes-agent — per-provider rollup so cross-provider
+// attribution is visible without forcing the UI to pivot the by_model
+// table. The backend groups (model, billing_provider) then sums into
+// one row per provider; this renders that rollup.
+function ProviderTable({ providers }: { providers: AnalyticsProviderEntry[] }) {
+  const { t } = useI18n();
+  const { sorted, sortKey, sortDir, toggle } = useTableSort(
+    providers,
+    "input_tokens",
+    "desc",
+  );
+
+  if (providers.length === 0) return null;
+
+  const providerLabel = t.analytics.provider ?? "Provider";
+  const providersLabel = t.analytics.providers ?? "Providers";
+  const modelsLabel = t.analytics.modelsLabel ?? "Models";
+  const apiCallsLabel = t.analytics.apiCallsLabel ?? t.analytics.apiCalls;
+  const unassignedLabel = t.analytics.unassigned ?? "(unassigned)";
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <Globe2 className="h-5 w-5 text-muted-foreground" />
+          <CardTitle className="text-base">
+            {t.analytics.perProviderBreakdown ?? providersLabel}
+          </CardTitle>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-x-auto">
+          <table className="w-full font-mondwest normal-case text-sm">
+            <thead>
+              <tr className="border-b border-border text-muted-foreground text-xs">
+                <SortHeader label={providerLabel} col="billing_provider" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-left py-2 pr-4 font-medium" />
+                <SortHeader label={t.sessions.title} col="sessions" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
+                <SortHeader label={apiCallsLabel} col="api_calls" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
+                <SortHeader label={modelsLabel} col="model_count" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
+                <SortHeader label={t.analytics.tokens} col="input_tokens" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 pl-4 font-medium" />
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((p) => (
+                <tr
+                  key={p.billing_provider || "(unassigned)"}
+                  className="border-b border-border/50 hover:bg-secondary/20 transition-colors"
+                >
+                  <td className="py-2 pr-4">
+                    <span className="font-mono-ui text-xs">
+                      {p.display_name || unassignedLabel}
+                    </span>
+                  </td>
+                  <td className="text-right py-2 px-4 text-muted-foreground">
+                    {p.sessions}
+                  </td>
+                  <td className="text-right py-2 px-4 text-muted-foreground">
+                    {p.api_calls}
+                  </td>
+                  <td className="text-right py-2 px-4 text-muted-foreground">
+                    <span title={p.models.join(", ")}>
+                      {p.model_count}
+                    </span>
+                  </td>
+                  <td className="text-right py-2 pl-4">
+                    <span style={{ color: "var(--series-input-token)" }}>
+                      {formatTokens(p.input_tokens)}
+                    </span>
+                    {" / "}
+                    <span style={{ color: "var(--series-output-token)" }}>
+                      {formatTokens(p.output_tokens)}
                     </span>
                   </td>
                 </tr>
@@ -578,6 +680,9 @@ export default function AnalyticsPage() {
 
           <DailyTable daily={data.daily} />
           <ModelTable models={data.by_model} />
+          {data.by_provider && data.by_provider.length > 0 && (
+            <ProviderTable providers={data.by_provider} />
+          )}
           <SkillTable skills={data.skills.top_skills} />
         </>
       )}
@@ -585,6 +690,7 @@ export default function AnalyticsPage() {
       {data &&
         data.daily.length === 0 &&
         data.by_model.length === 0 &&
+        (!data.by_provider || data.by_provider.length === 0) &&
         data.skills.top_skills.length === 0 && (
           <Card>
             <CardContent className="py-12">
