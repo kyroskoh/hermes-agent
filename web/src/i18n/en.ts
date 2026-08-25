@@ -224,6 +224,16 @@ export const en: Translations = {
     perDayAvg: "/day avg",
     acrossModels: "across {count} models",
     inOut: "{input} in / {output} out",
+    // FORK: kyroskoh/hermes-agent — by-provider view. Optional keys so
+    // locale files that haven't been updated yet still type-check.
+    perProviderBreakdown: "Per-Provider Breakdown",
+    provider: "Provider",
+    providers: "Providers",
+    unassigned: "(unassigned)",
+    apiCallsLabel: "API Calls",
+    modelsLabel: "Models",
+    expandAll: "Expand all",
+    collapseAll: "Collapse all",
   },
 
   models: {

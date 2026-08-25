@@ -520,6 +520,12 @@ export const api = {
     fetchJSON<AnalyticsResponse>(
       appendProfileParam(`/api/analytics/usage?days=${days}`, profile),
     ),
+  // FORK: kyroskoh/hermes-agent — by-provider-only endpoint for the
+  // /usage view's provider table.
+  getProvidersAnalytics: (days: number, profile = getManagementProfile()) =>
+    fetchJSON<{ by_provider: AnalyticsProviderEntry[]; period_days: number }>(
+      appendProfileParam(`/api/analytics/providers?days=${days}`, profile),
+    ),
   getModelsAnalytics: (days: number, profile = getManagementProfile()) =>
     fetchJSON<ModelsAnalyticsResponse>(
       appendProfileParam(`/api/analytics/models?days=${days}`, profile),
@@ -2225,11 +2231,48 @@ export interface AnalyticsDailyEntry {
 
 export interface AnalyticsModelEntry {
   model: string;
+  // FORK: kyroskoh/hermes-agent — backend now groups by (model,
+  // billing_provider) so the same model served by different providers
+  // doesn't collapse. Optional so older backend responses don't break.
+  billing_provider?: string;
+  input_tokens: number;
+  output_tokens: number;
+  sessions: number;
+  estimated_cost: number;
+  api_calls: number;
+  aux_tasks?: Array<{
+    task: string;
+    billing_provider?: string;
+    input_tokens: number;
+    output_tokens: number;
+    estimated_cost: number;
+    api_calls: number;
+  }>;
+}
+
+export interface AnalyticsProviderModelEntry {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  sessions: number;
+  estimated_cost: number;
+  api_calls: number;
+}
+
+export interface AnalyticsProviderEntry {
+  billing_provider: string;
+  display_name: string;
   input_tokens: number;
   output_tokens: number;
   estimated_cost: number;
   sessions: number;
   api_calls: number;
+  // FORK: kyroskoh/hermes-agent — nested per-model breakdown so each
+  // provider row shows which models under it are the heavy hitters.
+  models: AnalyticsProviderModelEntry[];
+  // Back-compat string[] for any consumer that just wants model names.
+  model_names?: string[];
+  model_count: number;
 }
 
 export interface AnalyticsSkillEntry {
@@ -2251,6 +2294,17 @@ export interface AnalyticsSkillsSummary {
 export interface AnalyticsResponse {
   daily: AnalyticsDailyEntry[];
   by_model: AnalyticsModelEntry[];
+  // FORK: kyroskoh/hermes-agent — by-provider rollup for cross-provider
+  // attribution. Optional so older backend responses don't break.
+  by_provider?: AnalyticsProviderEntry[];
+  by_task?: Array<{
+    task: string;
+    input_tokens: number;
+    output_tokens: number;
+    estimated_cost: number;
+    api_calls: number;
+    models: string[];
+  }>;
   totals: {
     total_input: number;
     total_output: number;

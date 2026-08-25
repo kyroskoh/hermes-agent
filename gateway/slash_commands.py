@@ -5451,7 +5451,6 @@ class GatewaySlashCommandsMixin:
         # Fetch account usage off the event loop so slow provider APIs don't
         # block the gateway. Failures are non-fatal -- account_lines stays [].
         account_lines: list[str] = []
-        credits_lines: list[str] = []
         if provider:
             try:
                 account_snapshot = await asyncio.to_thread(
@@ -5465,20 +5464,62 @@ class GatewaySlashCommandsMixin:
             if account_snapshot:
                 account_lines = render_account_usage_lines(account_snapshot, markdown=True)
 
-        # ── Nous credits magnitudes + monthly-grant % gauge ─────────────
-        # Shared with the CLI / TUI /usage block via nous_credits_lines(): a single
-        # auth-gate + portal-fetch + render path (which also honors the dev fixture).
-        # Run off the event loop. The helper gates on "a Nous account is logged in"
-        # — NOT the inference provider and NOT nested under `if provider:` — so a
-        # Nous-credentialled user running inference elsewhere (or with none resident)
-        # still sees their balance. NO recovery trigger: messaging binds no notice
-        # consumer, so /usage only displays. Fail-open: never break /usage.
+        # ── Multi-provider Quotas + Refresh Cycles ─────────────────────
+        # FORK: kyroskoh/hermes-agent — query ALL configured providers
+        # (Nous, Codex, Anthropic, OpenRouter, etc.) and render their
+        # current quotas, limits, balances, and reset/refresh dates.
+        all_quota_lines: list[str] = []
         try:
-            from agent.account_usage import nous_credits_lines
+            from agent.account_usage import all_configured_account_usage_lines
 
-            credits_lines = await asyncio.to_thread(nous_credits_lines, markdown=True)
+            all_quota_lines = await asyncio.to_thread(
+                all_configured_account_usage_lines, markdown=True
+            )
         except Exception:
-            credits_lines = []  # fail-open: never break /usage
+            all_quota_lines = []  # fail-open: never break /usage
+
+        # Combine active provider account lines (if not already in all_quota_lines)
+        if all_quota_lines:
+            account_lines = all_quota_lines
+
+        # Also pull token usage analytics across all providers & models (last 30d)
+        providers_token_lines: list[str] = []
+        try:
+            from hermes_cli.web_server import _get_usage_analytics
+
+            analytics = await asyncio.to_thread(_get_usage_analytics, 30, None)
+            by_provider = analytics.get("by_provider") or []
+            if by_provider:
+                providers_token_lines.append(t("gateway.usage.providers_header"))
+                for prov in by_provider:
+                    provider_display = (
+                        prov.get("display_name")
+                        or prov.get("billing_provider")
+                        or t("gateway.usage.providers_unassigned")
+                    )
+                    providers_token_lines.append(
+                        t(
+                            "gateway.usage.providers_line",
+                            provider=provider_display,
+                            sessions=prov.get("sessions", 0),
+                            api_calls=prov.get("api_calls", 0),
+                            tokens_in=f"{prov.get('input_tokens', 0):,}",
+                            tokens_out=f"{prov.get('output_tokens', 0):,}",
+                        )
+                    )
+                    for m in prov.get("models") or []:
+                        providers_token_lines.append(
+                            t(
+                                "gateway.usage.providers_model_line",
+                                model=m.get("model", "?"),
+                                sessions=m.get("sessions", 0),
+                                api_calls=m.get("api_calls", 0),
+                                tokens_in=f"{m.get('input_tokens', 0):,}",
+                                tokens_out=f"{m.get('output_tokens', 0):,}",
+                            )
+                        )
+        except Exception:
+            pass
 
         if agent and hasattr(agent, "session_total_tokens") and agent.session_api_calls > 0:
             lines = []
@@ -5511,9 +5552,6 @@ class GatewaySlashCommandsMixin:
                 lines.append(t("gateway.usage.label_compressions", count=ctx.compression_count))
 
             # Per-category context breakdown (estimated — chars/4 heuristic).
-            # Same engine the desktop popover uses (PR #54907). The system
-            # prompt / tools / skills / memory slices read off the live agent;
-            # the conversation slice is estimated from the session transcript.
             breakdown_lines = await asyncio.to_thread(
                 self._context_breakdown_lines, agent, source
             )
@@ -5524,9 +5562,9 @@ class GatewaySlashCommandsMixin:
             if account_lines:
                 lines.append("")
                 lines.extend(account_lines)
-            if credits_lines:
+            if providers_token_lines:
                 lines.append("")
-                lines.extend(credits_lines)
+                lines.extend(providers_token_lines)
 
             return "\n".join(lines)
 
@@ -5546,17 +5584,17 @@ class GatewaySlashCommandsMixin:
             if account_lines:
                 lines.append("")
                 lines.extend(account_lines)
-            if credits_lines:
+            if providers_token_lines:
                 lines.append("")
-                lines.extend(credits_lines)
+                lines.extend(providers_token_lines)
             return "\n".join(lines)
-        if account_lines or credits_lines:
-            # account-only, credits-only, or both — joined with a blank divider.
-            parts = list(account_lines)
-            if credits_lines:
-                if parts:
-                    parts.append("")
-                parts.extend(credits_lines)
+
+        parts = list(account_lines)
+        if providers_token_lines:
+            if parts:
+                parts.append("")
+            parts.extend(providers_token_lines)
+        if parts:
             return "\n".join(parts)
         return t("gateway.usage.no_data")
 

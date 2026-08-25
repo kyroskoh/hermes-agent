@@ -5,7 +5,9 @@ import {
   ArrowUpDown,
   BarChart3,
   Brain,
+  ChevronRight,
   Cpu,
+  Globe2,
   RefreshCw,
   TrendingUp,
 } from "lucide-react";
@@ -14,6 +16,7 @@ import type {
   AnalyticsResponse,
   AnalyticsDailyEntry,
   AnalyticsModelEntry,
+  AnalyticsProviderEntry,
   AnalyticsSkillEntry,
 } from "@/lib/api";
 import { timeAgo } from "@/lib/utils";
@@ -348,6 +351,228 @@ function ModelTable({ models }: { models: AnalyticsModelEntry[] }) {
   );
 }
 
+// FORK: kyroskoh/hermes-agent — per-provider rollup so cross-provider
+// attribution is visible without forcing the UI to pivot the by_model
+// table. The backend groups (model, billing_provider) and ships a nested
+// `models: [{model, sessions, api_calls, ...}]` breakdown for each
+// provider so the heavy-hitter model inside every provider is visible at
+// a glance.
+function ProviderTable({ providers }: { providers: AnalyticsProviderEntry[] }) {
+  const { t } = useI18n();
+  const { sorted, sortKey, sortDir, toggle } = useTableSort(
+    providers,
+    "input_tokens",
+    "desc",
+  );
+  // Per-row expanded state. All providers start expanded so the operator
+  // sees the model breakdown on first load. The set keys by provider id
+  // so expanding/collapsing survives re-renders.
+  const [expanded, setExpanded] = useState<Set<string>>(
+    () => new Set(providers.map((p) => p.billing_provider || "(unassigned)")),
+  );
+
+  if (providers.length === 0) return null;
+
+  const providerLabel = t.analytics.provider ?? "Provider";
+  const providersLabel = t.analytics.providers ?? "Providers";
+  const modelsLabel = t.analytics.modelsLabel ?? "Models";
+  const apiCallsLabel = t.analytics.apiCallsLabel ?? t.analytics.apiCalls;
+  const unassignedLabel = t.analytics.unassigned ?? "(unassigned)";
+  const expandAllLabel = t.analytics.expandAll ?? "Expand all";
+  const collapseAllLabel = t.analytics.collapseAll ?? "Collapse all";
+
+  const toggleProvider = (key: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const allKeys = providers.map((p) => p.billing_provider || "(unassigned)");
+  const allExpanded = allKeys.every((k) => expanded.has(k));
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Globe2 className="h-5 w-5 text-muted-foreground" />
+            <CardTitle className="text-base">
+              {t.analytics.perProviderBreakdown ?? providersLabel}
+            </CardTitle>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            ghost
+            onClick={() =>
+              setExpanded(
+                allExpanded ? new Set() : new Set(allKeys),
+              )
+            }
+          >
+            {allExpanded ? collapseAllLabel : expandAllLabel}
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-x-auto">
+          <table className="w-full font-mondwest normal-case text-sm">
+            <thead>
+              <tr className="border-b border-border text-muted-foreground text-xs">
+                <th className="w-6 py-2" aria-hidden="true" />
+                <SortHeader label={providerLabel} col="billing_provider" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-left py-2 pr-4 font-medium" />
+                <SortHeader label={t.sessions.title} col="sessions" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
+                <SortHeader label={apiCallsLabel} col="api_calls" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
+                <SortHeader label={modelsLabel} col="model_count" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
+                <SortHeader label={t.analytics.tokens} col="input_tokens" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 pl-4 font-medium" />
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((p) => {
+                const key = p.billing_provider || "(unassigned)";
+                const isOpen = expanded.has(key);
+                return (
+                  <ProviderRowGroup
+                    key={key}
+                    provider={p}
+                    isOpen={isOpen}
+                    onToggle={() => toggleProvider(key)}
+                    unassignedLabel={unassignedLabel}
+                    inputLabel={t.analytics.input}
+                    outputLabel={t.analytics.output}
+                  />
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ProviderRowGroup({
+  provider,
+  isOpen,
+  onToggle,
+  unassignedLabel,
+  inputLabel,
+  outputLabel,
+}: {
+  provider: AnalyticsProviderEntry;
+  isOpen: boolean;
+  onToggle: () => void;
+  unassignedLabel: string;
+  inputLabel: string;
+  outputLabel: string;
+}) {
+  const providerKey = provider.billing_provider || "(unassigned)";
+  const modelRows = provider.models ?? [];
+  // Back-compat: if `models` is the legacy string[] (older backend), fall
+  // back to rendering just model names without per-model metrics.
+  const isLegacyStringList =
+    modelRows.length > 0 && typeof modelRows[0] === "string";
+
+  return (
+    <>
+      <tr
+        className="border-b border-border/50 hover:bg-secondary/20 transition-colors cursor-pointer"
+        onClick={onToggle}
+        aria-expanded={isOpen}
+      >
+        <td className="py-2 pl-2 pr-1 text-muted-foreground">
+          <ChevronRight
+            className={
+              "h-3.5 w-3.5 transition-transform " +
+              (isOpen ? "rotate-90" : "")
+            }
+            aria-hidden="true"
+          />
+        </td>
+        <td className="py-2 pr-4">
+          <span className="font-mono-ui text-xs">
+            {provider.display_name || unassignedLabel}
+          </span>
+        </td>
+        <td className="text-right py-2 px-4 text-muted-foreground">
+          {provider.sessions}
+        </td>
+        <td className="text-right py-2 px-4 text-muted-foreground">
+          {provider.api_calls}
+        </td>
+        <td className="text-right py-2 px-4 text-muted-foreground">
+          <span
+            title={
+              isLegacyStringList
+                ? (modelRows as unknown as string[]).join(", ")
+                : (modelRows as Array<{ model: string }>)
+                    .map((m) => m.model)
+                    .join(", ")
+            }
+          >
+            {provider.model_count}
+          </span>
+        </td>
+        <td className="text-right py-2 pl-4">
+          <span style={{ color: "var(--series-input-token)" }}>
+            {formatTokens(provider.input_tokens)}
+          </span>
+          {" / "}
+          <span style={{ color: "var(--series-output-token)" }}>
+            {formatTokens(provider.output_tokens)}
+          </span>
+        </td>
+      </tr>
+      {isOpen &&
+        !isLegacyStringList &&
+        (modelRows as Array<{ model: string; input_tokens: number; output_tokens: number; sessions: number; api_calls: number }>).map(
+          (m) => (
+            <tr
+              key={`${providerKey}::${m.model}`}
+              className="border-b border-border/30 bg-secondary/10 hover:bg-secondary/30 transition-colors"
+            >
+              <td className="py-1.5 pl-6 pr-1 text-muted-foreground/60 text-xs">
+                ↳
+              </td>
+              <td className="py-1.5 pr-4">
+                <span className="font-mono-ui text-xs text-muted-foreground">
+                  {m.model}
+                </span>
+              </td>
+              <td className="text-right py-1.5 px-4 text-muted-foreground">
+                {m.sessions}
+              </td>
+              <td className="text-right py-1.5 px-4 text-muted-foreground">
+                {m.api_calls}
+              </td>
+              <td className="text-right py-1.5 px-4 text-muted-foreground/60">
+                —
+              </td>
+              <td className="text-right py-1.5 pl-4">
+                <span
+                  style={{ color: "var(--series-input-token)" }}
+                  title={`${inputLabel}: ${m.input_tokens.toLocaleString()}`}
+                >
+                  {formatTokens(m.input_tokens)}
+                </span>
+                {" / "}
+                <span
+                  style={{ color: "var(--series-output-token)" }}
+                  title={`${outputLabel}: ${m.output_tokens.toLocaleString()}`}
+                >
+                  {formatTokens(m.output_tokens)}
+                </span>
+              </td>
+            </tr>
+          ),
+        )}
+    </>
+  );
+}
+
 function SkillTable({ skills }: { skills: AnalyticsSkillEntry[] }) {
   const { t } = useI18n();
   const { sorted, sortKey, sortDir, toggle } = useTableSort(skills, "total_count", "desc");
@@ -578,6 +803,9 @@ export default function AnalyticsPage() {
 
           <DailyTable daily={data.daily} />
           <ModelTable models={data.by_model} />
+          {data.by_provider && data.by_provider.length > 0 && (
+            <ProviderTable providers={data.by_provider} />
+          )}
           <SkillTable skills={data.skills.top_skills} />
         </>
       )}

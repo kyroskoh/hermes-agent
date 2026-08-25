@@ -414,6 +414,11 @@ gateway:
     no_data:                  "No usage data available for this session."
     unknown_subcommand:       "Unknown /usage subcommand: `{args}`. Try `/usage` or `/usage reset [--force]`."
     reset_wrong_provider:     "Banked usage resets are only available on the openai-codex provider. Switch with `/model` first."
+    # FORK: kyroskoh/hermes-agent — cross-provider attribution in /usage
+    providers_header:         "🌐 **Usage by Provider** _(last 30 days)_"
+    providers_line:           "• **{provider}** — sessions: {sessions}, api: {api_calls}, tokens: {tokens_in} in / {tokens_out} out"
+    providers_model_line:     "    ↳ `{model}`: {sessions} sessions, {api_calls} calls ({tokens_in} in / {tokens_out} out)"
+    providers_unassigned:     "(unassigned)"
 
   credits:
     not_logged_in:            "Not logged into Nous Portal. Log in to see your credit balance and top up."

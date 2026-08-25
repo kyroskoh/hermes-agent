@@ -2963,6 +2963,169 @@ class TestNewEndpoints:
         mock_generate.assert_not_called()
         assert any(tool["tool"] == "read_file" for tool in resp.json()["tools"])
 
+    # FORK: kyroskoh/hermes-agent — by_provider + per-(model, billing_provider)
+    # grouping so cross-provider attribution is visible without collapsing
+    # same-model-different-provider rows into one.
+    def test_analytics_usage_groups_by_model_and_billing_provider(self):
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            # Same model, two different providers — must show up as two rows.
+            db.create_session(
+                session_id="byprovider-m3-a",
+                source="cli",
+                model="minimax/MiniMax-M3",
+            )
+            db.update_token_counts(
+                "byprovider-m3-a",
+                input_tokens=1000,
+                output_tokens=200,
+                billing_provider="minimax-oauth",
+            )
+            db.create_session(
+                session_id="byprovider-m3-b",
+                source="cli",
+                model="minimax/MiniMax-M3",
+            )
+            db.update_token_counts(
+                "byprovider-m3-b",
+                input_tokens=500,
+                output_tokens=100,
+                billing_provider="opencode-go",
+            )
+            # Same model+provider on a second session — should merge, not duplicate.
+            db.create_session(
+                session_id="byprovider-m3-a2",
+                source="cli",
+                model="minimax/MiniMax-M3",
+            )
+            db.update_token_counts(
+                "byprovider-m3-a2",
+                input_tokens=300,
+                output_tokens=50,
+                billing_provider="minimax-oauth",
+            )
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/analytics/usage?days=7")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # Filter to just our test rows so we don't collide with other suites'
+        # fixtures that may also have minimax/MiniMax-M3 sessions.
+        m3_rows = [
+            m for m in data["by_model"]
+            if m["model"] == "minimax/MiniMax-M3"
+            and m.get("billing_provider") in ("minimax-oauth", "opencode-go")
+        ]
+        assert len(m3_rows) == 2, f"expected 2 grouped rows, got {m3_rows}"
+
+        providers = {m["billing_provider"]: m for m in m3_rows}
+        assert providers["minimax-oauth"]["input_tokens"] == 1300
+        assert providers["minimax-oauth"]["output_tokens"] == 250
+        assert providers["minimax-oauth"]["sessions"] == 2
+        assert providers["opencode-go"]["input_tokens"] == 500
+        assert providers["opencode-go"]["sessions"] == 1
+
+        # by_provider must also include both providers.
+        prov_keys = {p["billing_provider"] for p in data["by_provider"]}
+        assert "minimax-oauth" in prov_keys
+        assert "opencode-go" in prov_keys
+
+    def test_analytics_providers_endpoint_returns_only_by_provider(self):
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(
+                session_id="providers-only-a",
+                source="cli",
+                model="openai/gpt-5.6-sol",
+            )
+            db.update_token_counts(
+                "providers-only-a",
+                input_tokens=200,
+                output_tokens=40,
+                billing_provider="openai-codex",
+            )
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/analytics/providers?days=7")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "by_provider" in data
+        assert "period_days" in data
+        assert data["period_days"] == 7
+        # openai-codex should appear with at least the row we just inserted.
+        codex = [p for p in data["by_provider"] if p["billing_provider"] == "openai-codex"]
+        assert len(codex) == 1
+        assert codex[0]["input_tokens"] >= 200
+        # model_count surfaces the distinct models under this provider.
+        # `model_names` is the back-compat flat string[] (see _aggregate_by_provider).
+        assert "openai/gpt-5.6-sol" in codex[0]["model_names"]
+
+    # FORK: kyroskoh/hermes-agent — /api/analytics/providers must break each
+    # provider down by its underlying models, not just a flat string list.
+    def test_analytics_providers_nests_per_model_breakdown(self):
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            # openai-codex serving 3 different models in the window.
+            for sid, model, prov, ptok, ctok in [
+                ("nest-codex-1", "openai/gpt-5.6-sol", "openai-codex", 1000, 100),
+                ("nest-codex-2", "openai/gpt-5.6-sol", "openai-codex", 500, 50),
+                ("nest-codex-3", "openai/gpt-5.6-luna", "openai-codex", 200, 20),
+                ("nest-nous-1", "google/gemini-3.7-flash", "nous", 800, 60),
+            ]:
+                db.create_session(session_id=sid, source="cli", model=model)
+                db.update_token_counts(
+                    sid,
+                    input_tokens=ptok,
+                    output_tokens=ctok,
+                    billing_provider=prov,
+                )
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/analytics/providers?days=7")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        codex = [p for p in data["by_provider"] if p["billing_provider"] == "openai-codex"]
+        assert len(codex) == 1
+        codex_row = codex[0]
+
+        # Each model gets its own object — NOT a flat string[].
+        assert isinstance(codex_row["models"], list)
+        assert all(isinstance(m, dict) for m in codex_row["models"])
+        assert all("input_tokens" in m and "model" in m for m in codex_row["models"])
+
+        # Two distinct models under openai-codex with the right totals.
+        codex_models = {m["model"]: m for m in codex_row["models"]}
+        assert set(codex_models) == {"openai/gpt-5.6-sol", "openai/gpt-5.6-luna"}
+        assert codex_models["openai/gpt-5.6-sol"]["input_tokens"] == 1500
+        assert codex_models["openai/gpt-5.6-sol"]["output_tokens"] == 150
+        # Two sessions share the gpt-5.6-sol bucket — sessions count = 2.
+        assert codex_models["openai/gpt-5.6-sol"]["sessions"] == 2
+        assert codex_models["openai/gpt-5.6-luna"]["input_tokens"] == 200
+        assert codex_models["openai/gpt-5.6-luna"]["sessions"] == 1
+
+        # model_names is the back-compat flat string list of the same models.
+        assert sorted(codex_row["model_names"]) == sorted(codex_models)
+
+        # Provider rollup tokens equal the sum of its per-model tokens.
+        assert codex_row["input_tokens"] == 1700
+        assert codex_row["output_tokens"] == 170
+
+        nous = [p for p in data["by_provider"] if p["billing_provider"] == "nous"]
+        assert len(nous) == 1
+        assert nous[0]["model_count"] == 1
+        assert nous[0]["models"][0]["model"] == "google/gemini-3.7-flash"
+
 # ---------------------------------------------------------------------------
 # Model context length: normalize/denormalize + /api/model/info
 # ---------------------------------------------------------------------------

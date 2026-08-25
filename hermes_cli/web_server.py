@@ -16437,6 +16437,66 @@ def _aux_task_summary(aux_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return result
 
 
+def _aggregate_by_provider(
+    by_model: List[Dict[str, Any]], aux_rows: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Roll up (model, billing_provider) rows into a per-provider view that
+    ALSO breaks each provider down by its underlying models.
+    """
+    agg: Dict[str, Dict[str, Any]] = {}
+    for row in by_model:
+        provider = (row.get("billing_provider") or "").strip() or "(unassigned)"
+        d = agg.setdefault(provider, {
+            "billing_provider": provider if provider != "(unassigned)" else "",
+            "display_name": provider,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "estimated_cost": 0,
+            "sessions": 0,
+            "api_calls": 0,
+            "model_totals": {},
+        })
+        d["input_tokens"] += row.get("input_tokens") or 0
+        d["output_tokens"] += row.get("output_tokens") or 0
+        d["estimated_cost"] += row.get("estimated_cost") or 0
+        d["sessions"] += row.get("sessions") or 0
+        d["api_calls"] += row.get("api_calls") or 0
+        model = row.get("model") or ""
+        if not model:
+            continue
+        m_totals = d["model_totals"]
+        m = m_totals.setdefault(model, {
+            "model": model,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "estimated_cost": 0,
+            "sessions": 0,
+            "api_calls": 0,
+        })
+        m["input_tokens"] += row.get("input_tokens") or 0
+        m["output_tokens"] += row.get("output_tokens") or 0
+        m["estimated_cost"] += row.get("estimated_cost") or 0
+        m["sessions"] += row.get("sessions") or 0
+        m["api_calls"] += row.get("api_calls") or 0
+
+    result = []
+    for d in agg.values():
+        models_list = sorted(
+            d.pop("model_totals").values(),
+            key=lambda r: (r.get("input_tokens") or 0) + (r.get("output_tokens") or 0),
+            reverse=True,
+        )
+        d["models"] = models_list
+        d["model_count"] = len(models_list)
+        d["model_names"] = [m["model"] for m in models_list]
+        result.append(d)
+    result.sort(
+        key=lambda r: (r.get("input_tokens") or 0) + (r.get("output_tokens") or 0),
+        reverse=True,
+    )
+    return result
+
+
 def _get_usage_analytics(days: int = 30, profile: Optional[str] = None):
     from agent.insights import InsightsEngine
 
@@ -16458,25 +16518,44 @@ def _get_usage_analytics(days: int = 30, profile: Optional[str] = None):
         """, (cutoff,))
         daily = [dict(r) for r in cur.fetchall()]
 
+        # FORK: kyroskoh/hermes-agent — Group by (model, billing_provider) so
+        # cross-provider attribution is visible — same model served by
+        # multiple providers (MiniMax-M3 on minimax-oauth vs opencode-go
+        # vs openai-codex) no longer collapses into one row. Sessions
+        # created before the first billable call (billing_provider == '')
+        # are filled in from session_model_usage when unambiguous.
         cur2 = db._conn.execute("""
             SELECT model,
+                   COALESCE(NULLIF(billing_provider, ''),
+                            (SELECT u.billing_provider
+                             FROM session_model_usage u
+                             WHERE u.session_id = s.id AND u.billing_provider != ''
+                             ORDER BY u.api_call_count DESC, u.last_seen DESC
+                             LIMIT 1)) as billing_provider,
                    SUM(input_tokens) as input_tokens,
                    SUM(output_tokens) as output_tokens,
                    COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost,
                    COUNT(*) as sessions,
                    SUM(COALESCE(api_call_count, 0)) as api_calls
-            FROM sessions WHERE started_at > ? AND model IS NOT NULL
-            GROUP BY model ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
+            FROM sessions s
+            WHERE started_at > ? AND model IS NOT NULL
+            GROUP BY model, billing_provider
+            ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
         """, (cutoff,))
         by_model = [dict(r) for r in cur2.fetchall()]
 
         # Fold in auxiliary usage (vision, compression, title_generation, ...)
-        # recorded per (model, task) in session_model_usage. Aux calls never
-        # touch the sessions counters, so this is add-only — no double count.
-        # Without it the models list shows only the main agent model even when
-        # aux models are actively burning tokens (issue #23270).
+        # recorded per (model, task, billing_provider) in session_model_usage.
+        # Aux calls never touch the sessions counters, so this is add-only —
+        # no double count. Keys by (model, billing_provider) so aux rows
+        # stay attributed to the right provider.
         aux_rows = _aux_usage_rows(db, cutoff)
         by_model = _merge_aux_into_by_model(by_model, aux_rows)
+
+        # Per-provider rollup across all models + aux tasks. The dashboard
+        # uses this for "what am I spending on openai-codex vs minimax-oauth
+        # vs nous" without forcing the UI to pivot the by_model table.
+        by_provider = _aggregate_by_provider(by_model, aux_rows)
 
         cur3 = db._conn.execute("""
             SELECT SUM(input_tokens) as total_input,
@@ -16495,6 +16574,10 @@ def _get_usage_analytics(days: int = 30, profile: Optional[str] = None):
         return {
             "daily": daily,
             "by_model": by_model,
+            # FORK: kyroskoh/hermes-agent — per-provider rollup so the
+            # dashboard can show cross-provider attribution + the /usage
+            # slash command can print the same breakdown.
+            "by_provider": by_provider,
             # Aux-task summary across models (vision, compression, ...). Lets
             # the dashboard answer "what is compression costing me" directly.
             "by_task": _aux_task_summary(aux_rows),
@@ -16519,6 +16602,25 @@ async def get_usage_analytics(
     produce empty/inverted time windows. The UI only offers 7/30/90-day
     presets."""
     return await asyncio.to_thread(_get_usage_analytics, days, profile)
+
+
+@app.get("/api/analytics/providers")
+async def get_providers_analytics(
+    days: int = Query(30, ge=1, le=365),
+    profile: Optional[str] = None,
+):
+    """By-provider-only view of token/cost/session usage.
+
+    Companion to ``/api/analytics/usage`` — when the dashboard wants
+    just the per-provider rollup (e.g. /usage focus) it can call this
+    instead of pulling the full response and ignoring the by_model /
+    by_task fields. Returns ``{"by_provider": [...], "period_days": N}``.
+    """
+    payload = await asyncio.to_thread(_get_usage_analytics, days, profile)
+    return {
+        "by_provider": payload.get("by_provider", []),
+        "period_days": payload.get("period_days", days),
+    }
 
 
 def _get_models_analytics(days: int = 30, profile: Optional[str] = None):

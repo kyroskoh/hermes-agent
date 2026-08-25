@@ -232,17 +232,11 @@ def build_nous_credits_snapshot(account_info) -> Optional[AccountUsageSnapshot]:
 
 def nous_credits_lines(*, markdown: bool = False, timeout: float = 10.0) -> list[str]:
     """Return rendered Nous-credits /usage lines, or [] when there's nothing to show.
-
-    Account-independent of any live agent: gated on "a Nous account is logged in"
-    (a cheap local auth-state check), then a wall-clock-bounded portal fetch. Shared
-    by the CLI ``_show_usage`` and the TUI ``session.usage`` RPC so both surfaces show
-    the same block regardless of session API-call count or resume state. Fail-open:
-    any auth/portal hiccup or timeout returns [] (the caller shows nothing).
-
-    Dev override: when HERMES_DEV_CREDITS_FIXTURE selects a fixture state, /usage
-    renders from that fixture instead of the real portal (so the block + gauge are
-    testable without a live account). Throwaway scaffolding.
     """
+    return _nous_credits_lines_impl(markdown=markdown, timeout=timeout)
+
+
+def _nous_credits_lines_impl(*, markdown: bool = False, timeout: float = 10.0) -> list[str]:
     # Dev fixture short-circuit — render /usage from the injected state, no portal.
     try:
         from agent.credits_tracker import dev_fixture_credits_state
@@ -278,6 +272,51 @@ def nous_credits_lines(*, markdown: bool = False, timeout: float = 10.0) -> list
         # /usage credits block is diagnosable in agent.log without a dev flag.
         logger.debug("credits ▸ /usage portal fetch/render failed (fail-open)", exc_info=True)
         return []
+
+
+def all_configured_account_usage_lines(*, markdown: bool = False) -> list[str]:
+    """FORK: kyroskoh/hermes-agent — return rendered quota/balance lines for
+    ALL configured providers that have authentication credentials, not just the
+    currently-active provider.
+    """
+    from hermes_cli.auth import get_provider_auth_state, read_credential_pool
+
+    all_blocks: list[list[str]] = []
+    seen_providers: set[str] = set()
+
+    # 1. Nous portal credits (if logged in)
+    nous_lines = nous_credits_lines(markdown=markdown)
+    if nous_lines:
+        all_blocks.append(nous_lines)
+        seen_providers.add("nous")
+
+    # 2. Check other known providers with usage/quota APIs
+    for prov in ["openai-codex", "anthropic", "openrouter"]:
+        if prov in seen_providers:
+            continue
+        try:
+            st = get_provider_auth_state(prov)
+            pool = read_credential_pool(prov)
+            has_auth = bool(st) or bool(isinstance(pool, list) and pool)
+            if not has_auth:
+                continue
+
+            snap = fetch_account_usage(prov)
+            if snap:
+                lines = render_account_usage_lines(snap, markdown=markdown)
+                if lines:
+                    all_blocks.append(lines)
+                    seen_providers.add(prov)
+        except Exception as exc:
+            logger.debug("Error fetching account usage for %s: %s", prov, exc)
+
+    # Flatten with double newlines between provider blocks
+    result: list[str] = []
+    for i, block in enumerate(all_blocks):
+        if i > 0 and result:
+            result.append("")
+        result.extend(block)
+    return result
 
 
 def _snapshot_from_credits_state(state) -> Optional[AccountUsageSnapshot]:
