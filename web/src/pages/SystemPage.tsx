@@ -59,6 +59,10 @@ import type {
   CuratorStatus,
   PortalStatus,
   DebugShareResponse,
+  // FORK: kyroskoh/hermes-agent — fleet health widget on the
+  // System page. The shape is defined alongside the rest of the
+  // analytics types in @/lib/api.ts.
+  FleetStatusResponse,
 } from "@/lib/api";
 
 function formatBytes(n: number): string {
@@ -252,6 +256,23 @@ export default function SystemPage() {
   );
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateConfirmOpen, setUpdateConfirmOpen] = useState(false);
+
+  // ── Fleet health ──────────────────────────────────────────────────
+  // FORK: kyroskoh/hermes-agent — fleet health widget. The host-level
+  // /api/fleet/status endpoint serves the snapshot written by the
+  // hermes-fleet-self-heal cron to /var/lib/hermes/fleet-status.json.
+  // Refreshed every 60s because the cron runs every 6h, so a tighter
+  // poll window is fine and gives the operator a near-live "stale"
+  // banner if the cron is stuck.
+  const [fleet, setFleet] = useState<FleetStatusResponse | null>(null);
+  const loadFleet = useCallback(() => {
+    api.getFleetStatus().then(setFleet).catch(() => setFleet(null));
+  }, []);
+  useEffect(() => {
+    loadFleet();
+    const interval = setInterval(loadFleet, 60_000);
+    return () => clearInterval(interval);
+  }, [loadFleet]);
 
   const loadAll = useCallback(() => {
     Promise.allSettled([
@@ -950,6 +971,133 @@ export default function SystemPage() {
                   </span>
                 )}
               </div>
+            )}
+          </CardContent>
+        </Card>
+      </section>
+
+      {/* ── Fleet health ─────────────────────────────────────────── */}
+      {/* FORK: kyroskoh/hermes-agent — fleet health widget. Renders the
+          snapshot written by hermes-fleet-self-heal to
+          /var/lib/hermes/fleet-status.json. Polled every 60s. Shows a
+          per-unit table with state, port, and PID; the badge at the
+          top summarizes healthy / restarted / failed counts. Stale or
+          missing data renders a "no data" panel instead of failing. */}
+      <section className="flex flex-col gap-3">
+        <H2 variant="sm" className="flex items-center gap-2 text-muted-foreground">
+          <Server className="h-4 w-4" /> Fleet health
+        </H2>
+        <Card>
+          <CardContent className="flex flex-col gap-3 py-4">
+            {!fleet ? (
+              <div className="text-sm text-muted-foreground">Loading…</div>
+            ) : fleet.units.length === 0 ? (
+              <div className="text-sm text-muted-foreground">
+                No data — run <span className="font-mono">hermes-fleet-status</span> to inspect.
+              </div>
+            ) : (
+              <>
+                <div className="flex flex-wrap items-center gap-2 text-sm">
+                  <Badge
+                    tone={
+                      fleet.summary.failed > 0
+                        ? "destructive"
+                        : fleet.summary.restarted > 0 || fleet.stale
+                        ? "warning"
+                        : "success"
+                    }
+                  >
+                    {fleet.summary.failed > 0
+                      ? "Degraded"
+                      : fleet.stale
+                      ? "Stale"
+                      : "Healthy"}
+                  </Badge>
+                  <span className="text-muted-foreground">
+                    {fleet.summary.healthy} / {fleet.summary.total} healthy
+                  </span>
+                  {fleet.summary.restarted > 0 && (
+                    <span className="text-muted-foreground">
+                      · {fleet.summary.restarted} restarted
+                    </span>
+                  )}
+                  {fleet.summary.failed > 0 && (
+                    <span className="text-destructive">
+                      · {fleet.summary.failed} failed
+                    </span>
+                  )}
+                  {fleet.last_probe_at && (
+                    <span className="ml-auto text-xs text-muted-foreground">
+                      Last probe {fleet.last_probe_at}
+                    </span>
+                  )}
+                </div>
+                {fleet.stale && (
+                  <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                    Stale — last probe &gt; 6h ago
+                    {fleet.reason && (
+                      <span className="text-muted-foreground"> ({fleet.reason})</span>
+                    )}
+                  </div>
+                )}
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="text-xs uppercase tracking-wider text-muted-foreground">
+                      <tr>
+                        <th className="text-left py-2 pr-4 font-normal">Service</th>
+                        <th className="text-left py-2 pr-4 font-normal">State</th>
+                        <th className="text-left py-2 pr-4 font-normal">Port</th>
+                        <th className="text-right py-2 pr-4 font-normal">PID</th>
+                        <th className="text-right py-2 font-normal">Recovered</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {fleet.units.map((u) => (
+                        <tr
+                          key={u.name}
+                          className="border-t border-border/40"
+                        >
+                          <td className="py-2 pr-4 font-mono text-xs">{u.name}</td>
+                          <td className="py-2 pr-4">
+                            <span className="flex items-center gap-2">
+                              <span
+                                className={
+                                  u.healthy
+                                    ? "text-emerald-500"
+                                    : "text-destructive"
+                                }
+                                aria-hidden
+                              >
+                                {u.healthy ? "✓" : "✗"}
+                              </span>
+                              <span className="text-xs">
+                                {u.active_state}
+                                {u.sub_state && u.sub_state !== "running" && (
+                                  <span className="text-muted-foreground">
+                                    {" "}
+                                    ({u.sub_state})
+                                  </span>
+                                )}
+                              </span>
+                            </span>
+                          </td>
+                          <td className="py-2 pr-4 text-xs">
+                            {u.port ?? "—"}
+                          </td>
+                          <td className="py-2 pr-4 text-right text-xs text-muted-foreground">
+                            {u.main_pid || "—"}
+                          </td>
+                          <td className="py-2 text-right text-xs text-muted-foreground">
+                            {u.restart_attempted
+                              ? `${u.restart_seconds}s`
+                              : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
             )}
           </CardContent>
         </Card>

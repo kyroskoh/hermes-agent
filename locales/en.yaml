@@ -459,3 +459,23 @@ gateway:
     session_db_unavailable_prefix: "Session database not available"
     session_not_found:           "Session not found in database."
     warn_passthrough:            "⚠️ {error}"
+
+    # FORK: kyroskoh/hermes-agent — fleet health widget on the System
+    # page. Strings here are surfaced verbatim by <FleetStatusCard> in
+    # web/src/pages/SystemPage.tsx. The widget renders the snapshot
+    # written by the hermes-fleet-self-heal cron to
+    # /var/lib/hermes/fleet-status.json.
+    fleet_status_title:        "Fleet health"
+    fleet_status_healthy:      "Healthy"
+    fleet_status_degraded:     "Degraded"
+    fleet_status_stale:        "Stale — last probe >6h ago"
+    fleet_status_no_data:      "No data — run hermes-fleet-status to inspect"
+    fleet_status_probe_at:     "Last probe"
+    fleet_status_healthy_units: "Healthy units"
+    fleet_status_restarted:    "Restarted"
+    fleet_status_failed:       "Failed"
+    fleet_status_unit_name:    "Service"
+    fleet_status_unit_state:   "State"
+    fleet_status_unit_port:    "Port"
+    fleet_status_unit_pid:     "PID"
+    fleet_status_unit_age:     "Recovered in"

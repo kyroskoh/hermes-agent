@@ -3126,6 +3126,119 @@ class TestNewEndpoints:
         assert nous[0]["model_count"] == 1
         assert nous[0]["models"][0]["model"] == "google/gemini-3.7-flash"
 
+    # FORK: kyroskoh/hermes-agent — /api/fleet/status serves the
+    # hermes-fleet-self-heal cron output for the SystemPage widget.
+    def test_fleet_status_returns_file_contents_when_present(self, monkeypatch, tmp_path):
+        import hermes_cli.web_server as web_server
+
+        # Write a fresh-looking status file to a temp path and point
+        # the module's constant at it. Using a tmp file instead of the
+        # real /var/lib/hermes/fleet-status.json keeps the test
+        # hermetic and avoids any production-file race.
+        status_file = tmp_path / "fleet-status.json"
+        status_file.write_text(
+            """{
+                "last_probe_at": "2026-08-25T07:01:00+00:00",
+                "last_probe_exit": 0,
+                "host": "test-host",
+                "summary": {"total": 2, "healthy": 2, "restarted": 0, "failed": 0},
+                "units": [
+                    {
+                        "name": "hermes-dashboard.service",
+                        "active_state": "active",
+                        "sub_state": "running",
+                        "main_pid": 12345,
+                        "port": 9119,
+                        "healthy": true,
+                        "restart_attempted": false,
+                        "restart_succeeded": true,
+                        "restart_seconds": 0
+                    },
+                    {
+                        "name": "hermes-gateway-wilnice.service",
+                        "active_state": "active",
+                        "sub_state": "running",
+                        "main_pid": 12346,
+                        "port": null,
+                        "healthy": true,
+                        "restart_attempted": false,
+                        "restart_succeeded": true,
+                        "restart_seconds": 0
+                    }
+                ]
+            }""",
+            encoding="utf-8",
+        )
+        # Make the mtime be 1s ago — well within the 6h fresh window.
+        import os
+        os.utime(status_file, (time.time() - 1, time.time() - 1))
+        monkeypatch.setattr(web_server, "FLEET_STATUS_PATH", status_file)
+
+        resp = self.client.get("/api/fleet/status")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # Schema round-trips intact.
+        assert data["host"] == "test-host"
+        assert data["last_probe_exit"] == 0
+        assert data["summary"]["total"] == 2
+        assert data["summary"]["healthy"] == 2
+        assert len(data["units"]) == 2
+        assert data["units"][0]["name"] == "hermes-dashboard.service"
+        assert data["units"][0]["port"] == 9119
+        assert data["units"][1]["port"] is None
+
+        # Fresh file -> stale=False.
+        assert data["stale"] is False
+
+    def test_fleet_status_returns_stale_when_file_missing(self, monkeypatch, tmp_path):
+        import hermes_cli.web_server as web_server
+
+        # Point at a path that doesn't exist.
+        missing = tmp_path / "no-such-file.json"
+        assert not missing.exists()
+        monkeypatch.setattr(web_server, "FLEET_STATUS_PATH", missing)
+
+        resp = self.client.get("/api/fleet/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["stale"] is True
+        assert data["reason"] == "file_not_found"
+        assert data["units"] == []
+        assert data["summary"]["total"] == 0
+
+    def test_fleet_status_returns_stale_when_file_is_old(self, monkeypatch, tmp_path):
+        import hermes_cli.web_server as web_server
+
+        old_file = tmp_path / "fleet-status.json"
+        old_file.write_text('{"last_probe_at": null}', encoding="utf-8")
+        # mtime 7h ago — past the 6h stale threshold.
+        seven_h_ago = time.time() - 7 * 3600
+        import os
+        os.utime(old_file, (seven_h_ago, seven_h_ago))
+        monkeypatch.setattr(web_server, "FLEET_STATUS_PATH", old_file)
+
+        resp = self.client.get("/api/fleet/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["stale"] is True
+        # Original on-disk content is preserved.
+        assert data["last_probe_at"] is None
+
+    def test_fleet_status_returns_stale_on_corrupt_file(self, monkeypatch, tmp_path):
+        import hermes_cli.web_server as web_server
+
+        bad_file = tmp_path / "fleet-status.json"
+        bad_file.write_text("not valid json {{{", encoding="utf-8")
+        monkeypatch.setattr(web_server, "FLEET_STATUS_PATH", bad_file)
+
+        resp = self.client.get("/api/fleet/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["stale"] is True
+        assert "read_error" in data["reason"]
+        assert data["units"] == []
+
 # ---------------------------------------------------------------------------
 # Model context length: normalize/denormalize + /api/model/info
 # ---------------------------------------------------------------------------
