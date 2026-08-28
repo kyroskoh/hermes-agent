@@ -47,7 +47,23 @@ NOVELTY_PRESETS = [
     "noir-detective-2",
 ]
 
-ALL_NEW_PRESETS = WORK_MODE_PRESETS + NOVELTY_PRESETS
+# Singapore-local voices. Structured dicts (system_prompt + tone + style +
+# description) so the dashboard list view shows the description and the
+# rendered prompt includes Tone/Style lines. See personality.py for the full
+# definitions.
+SG_PRESETS = [
+    "sg-auntie",
+    "sg-kiasu",
+    "sg-kiasi",
+    "sg-kopitiam-uncle",
+    "sg-heartland-student",
+    "sg-property-agent",
+    "sg-ns-commando",
+    "sg-circuit-breaker-veteran",
+    "sg-grandmother",
+]
+
+ALL_NEW_PRESETS = WORK_MODE_PRESETS + NOVELTY_PRESETS + SG_PRESETS
 
 
 # ── registry completeness ───────────────────────────────────────────────────
@@ -61,23 +77,40 @@ def test_new_preset_is_registered(name: str):
     )
 
 
-@pytest.mark.parametrize("name", WORK_MODE_PRESETS)
-def test_work_mode_preset_is_structured_dict(name: str):
-    """Work-mode presets are dicts with system_prompt + tone + style + description."""
+@pytest.mark.parametrize("name", WORK_MODE_PRESETS + SG_PRESETS)
+def test_structured_preset_is_dict(name: str):
+    """Work-mode AND Singapore-local presets are structured dicts."""
     defn = BUILTIN_PERSONALITIES[name]
     assert isinstance(defn, dict), (
-        f"work-mode preset {name!r} should be a structured dict, got {type(defn).__name__}"
+        f"structured preset {name!r} should be a dict, got {type(defn).__name__}"
     )
-    # Mandatory fields
     assert "system_prompt" in defn and defn["system_prompt"].strip(), (
-        f"work-mode preset {name!r} missing non-empty system_prompt"
+        f"{name!r} missing non-empty system_prompt"
     )
     assert "description" in defn and defn["description"].strip(), (
-        f"work-mode preset {name!r} missing description (used by dashboard list)"
+        f"{name!r} missing description (used by dashboard list)"
     )
-    # Tone and style are recommended for work-mode presets
-    assert "tone" in defn, f"work-mode preset {name!r} should declare tone"
-    assert "style" in defn, f"work-mode preset {name!r} should declare style"
+    assert "tone" in defn, f"{name!r} should declare tone"
+    assert "style" in defn, f"{name!r} should declare style"
+
+
+@pytest.mark.parametrize("name", SG_PRESETS)
+def test_sg_preset_mentions_singapore_context(name: str):
+    """Every SG preset should reference Singapore context in its system_prompt.
+    Guard against future contributors accidentally retitling without updating
+    the local-flavour marker."""
+    defn = BUILTIN_PERSONALITIES[name]
+    prompt = (defn.get("system_prompt", "") + " " + defn.get("description", "")).lower()
+    # Accept any common SG marker
+    sg_markers = [
+        "singapore", "sg ", "kopitiam", "singlish", "hokkien",
+        "teochew", "cantonese", "kiasu", "kiasi", "auntie",
+        "uncle", "hawker", "mrt", "hdb", "to a payoh",
+    ]
+    assert any(marker in prompt for marker in sg_markers), (
+        f"SG preset {name!r} has no Singapore-context marker in prompt or "
+        f"description (none of {sg_markers} matched)"
+    )
 
 
 @pytest.mark.parametrize("name", NOVELTY_PRESETS)
@@ -102,30 +135,31 @@ def test_new_preset_renders_to_non_empty_prompt(name: str):
     assert rendered.strip(), f"preset {name!r} renders to empty prompt"
 
 
-@pytest.mark.parametrize("name", WORK_MODE_PRESETS)
-def test_work_mode_render_contains_tone_and_style(name: str):
-    """render_personality_prompt appends 'Tone:' and 'Style:' lines for dicts."""
+@pytest.mark.parametrize("name", WORK_MODE_PRESETS + SG_PRESETS)
+def test_structured_render_contains_tone_and_style(name: str):
+    """render_personality_prompt appends 'Tone:' and 'Style:' lines for dicts
+    (work-mode AND Singapore-local presets)."""
     rendered = render_personality_prompt(BUILTIN_PERSONALITIES[name])
-    assert "Tone:" in rendered, f"work-mode {name!r} render missing 'Tone:'"
-    assert "Style:" in rendered, f"work-mode {name!r} render missing 'Style:'"
+    assert "Tone:" in rendered, f"structured {name!r} render missing 'Tone:'"
+    assert "Style:" in rendered, f"structured {name!r} render missing 'Style:'"
 
 
-@pytest.mark.parametrize("name", WORK_MODE_PRESETS)
-def test_work_mode_render_contains_system_prompt(name: str):
+@pytest.mark.parametrize("name", WORK_MODE_PRESETS + SG_PRESETS)
+def test_structured_render_contains_system_prompt(name: str):
     """render_personality_prompt keeps the system_prompt text in the output."""
     defn = BUILTIN_PERSONALITIES[name]
     rendered = render_personality_prompt(defn)
     # Use the first sentence to assert presence (avoids exact-string brittleness)
     first_sentence = defn["system_prompt"].split(".")[0]
     assert first_sentence in rendered, (
-        f"work-mode {name!r} render dropped the first system_prompt sentence"
+        f"structured {name!r} render dropped the first system_prompt sentence"
     )
 
 
 # ── description (list-UI surface) ──────────────────────────────────────────
 
 
-@pytest.mark.parametrize("name", WORK_MODE_PRESETS)
+@pytest.mark.parametrize("name", WORK_MODE_PRESETS + SG_PRESETS)
 def test_describe_uses_description_field(name: str):
     """describe_personality surfaces the description, not the prompt body."""
     defn = BUILTIN_PERSONALITIES[name]
@@ -186,10 +220,11 @@ def test_user_override_wins_for_new_preset():
 # ── resolve_ephemeral_system_prompt works end-to-end ───────────────────────
 
 
-@pytest.mark.parametrize("name", WORK_MODE_PRESETS)
-def test_work_mode_resolves_to_full_prompt_via_display_personality(name: str):
-    """When display.personality = <work-mode preset>, the resolved prompt is non-empty
-    and includes both system_prompt and tone/style rendering."""
+@pytest.mark.parametrize("name", WORK_MODE_PRESETS + SG_PRESETS)
+def test_structured_resolves_to_full_prompt_via_display_personality(name: str):
+    """When display.personality = <structured preset>, the resolved prompt is
+    non-empty and includes both system_prompt and tone/style rendering.
+    Covers work-mode AND Singapore-local presets."""
     cfg = {"display": {"personality": name}}
     prompt = resolve_ephemeral_system_prompt(cfg)
     assert prompt.strip()
