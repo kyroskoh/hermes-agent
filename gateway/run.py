@@ -8313,11 +8313,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # (e.g. user ran `hermes auth add openai-codex` without `hermes model`),
         # fall back to the provider's first catalog model so the API call
         # doesn't fail with "model must be a non-empty string".
+        #
+        # BUT: when the caller has a known global default model in user_config,
+        # prefer it — otherwise multiplexed chats whose config lookup returned
+        # empty would silently fall to whichever provider's first catalog model
+        # is cheapest (commonly kimi-k3 on opencode-go, which has a flaky
+        # upstream and gets 503'd under load). See #88532 follow-up.
         if not model and runtime_kwargs.get("provider"):
             try:
-                from hermes_cli.models import get_default_model_for_provider
-                model = get_default_model_for_provider(runtime_kwargs["provider"])
-                if model:
+                _fallback_model = None
+                _cfg_model = (
+                    (user_config or {}).get("model")
+                    if isinstance(user_config, dict)
+                    else None
+                )
+                if isinstance(_cfg_model, dict):
+                    _fallback_model = (
+                        _cfg_model.get("default")
+                        or _cfg_model.get("model")
+                    )
+                if not _fallback_model:
+                    from hermes_cli.models import get_default_model_for_provider
+                    _fallback_model = get_default_model_for_provider(
+                        runtime_kwargs["provider"]
+                    )
+                if _fallback_model:
+                    model = _fallback_model
                     logger.info(
                         "No model configured — defaulting to %s for provider %s",
                         model, runtime_kwargs["provider"],

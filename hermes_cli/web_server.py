@@ -50,7 +50,7 @@ import zipfile
 from hermes_cli._subprocess_compat import windows_detach_flags, windows_hide_flags
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
 import yaml
 
@@ -16588,76 +16588,306 @@ def _aux_task_summary(aux_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return result
 
 
-def _get_usage_analytics(days: int = 30, profile: Optional[str] = None):
-    from agent.insights import InsightsEngine
+def _enumerate_profile_state_db_paths(profile: Optional[str] = None) -> List[Path]:
+    """Return the state.db paths analytics endpoints should read from.
 
-    db = _open_session_db_for_profile(profile, read_only=True)
+    The multiplexed gateway writes each profile's sessions to that profile's
+    own ``state.db`` (e.g. ``profiles/kyros/state.db``,
+    ``profiles/wilnice/state.db``), not the root ``state.db``. The cron
+    scheduler and pre-multiplex legacy rows still land in the root DB.
+
+    When the caller passes ``profile``, only that profile's DB is returned.
+    When the caller passes ``None``, **all** discoverable profile DBs plus
+    the root DB are returned so the analytics rollup reflects every chat
+    that hit the gateway (Kyros's WhatsApp + Telegram + Discord + Wilnice's
+    inbound + cron + CLI).
+
+    Profiles are read from ``profiles/*/config.yaml`` in
+    ``$HERMES_HOME``. Missing or unreadable profile dirs are skipped
+    silently — analytics should degrade, not error.
+    """
+    from hermes_state import _default_db_path
+
+    paths: List[Path] = []
+    seen: Set[str] = set()
+
+    root_db = Path(_default_db_path())
+    if root_db.exists():
+        paths.append(root_db)
+        seen.add(str(root_db.resolve()))
+
+    if profile:
+        # Explicit profile: only that DB (root_db is already the default
+        # when profile is empty/None, so when caller wants a profile we
+        # ignore the root unless it IS the profile's home).
+        try:
+            _name, prof_home = _cron_profile_home(profile)
+            prof_db = Path(prof_home) / "state.db"
+            if prof_db.exists() and str(prof_db.resolve()) not in seen:
+                paths.append(prof_db)
+                seen.add(str(prof_db.resolve()))
+        except Exception:
+            pass
+        return paths
+
+    # No profile filter: enumerate every profiles/<name>/state.db found on
+    # disk so a session multiplexed for any profile is visible.
     try:
-        cutoff = time.time() - (days * 86400)
-        cur = db._conn.execute("""
-            SELECT date(started_at, 'unixepoch') as day,
-                   SUM(input_tokens) as input_tokens,
-                   SUM(output_tokens) as output_tokens,
-                   SUM(cache_read_tokens) as cache_read_tokens,
-                   SUM(reasoning_tokens) as reasoning_tokens,
-                   COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) as actual_cost,
-                   COUNT(*) as sessions,
-                   SUM(COALESCE(api_call_count, 0)) as api_calls
-            FROM sessions WHERE started_at > ?
-            GROUP BY day ORDER BY day
-        """, (cutoff,))
-        daily = [dict(r) for r in cur.fetchall()]
+        profiles_dir = root_db.parent / "profiles"
+        if profiles_dir.is_dir():
+            for prof_dir in sorted(profiles_dir.iterdir()):
+                if not prof_dir.is_dir():
+                    continue
+                # Skip hidden / system profiles
+                if prof_dir.name.startswith("."):
+                    continue
+                prof_db = prof_dir / "state.db"
+                if not prof_db.exists():
+                    continue
+                resolved = str(prof_db.resolve())
+                if resolved in seen:
+                    continue
+                paths.append(prof_db)
+                seen.add(resolved)
+    except Exception:
+        # Directory enumeration failure — analytics falls back to root only.
+        pass
+    return paths
 
-        cur2 = db._conn.execute("""
-            SELECT model,
-                   SUM(input_tokens) as input_tokens,
-                   SUM(output_tokens) as output_tokens,
-                   COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost,
-                   COUNT(*) as sessions,
-                   SUM(COALESCE(api_call_count, 0)) as api_calls
-            FROM sessions WHERE started_at > ? AND model IS NOT NULL
-            GROUP BY model ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
-        """, (cutoff,))
-        by_model = [dict(r) for r in cur2.fetchall()]
 
-        # Fold in auxiliary usage (vision, compression, title_generation, ...)
-        # recorded per (model, task) in session_model_usage. Aux calls never
-        # touch the sessions counters, so this is add-only — no double count.
-        # Without it the models list shows only the main agent model even when
-        # aux models are actively burning tokens (issue #23270).
-        aux_rows = _aux_usage_rows(db, cutoff)
-        by_model = _merge_aux_into_by_model(by_model, aux_rows)
+def _open_session_db_read_only(path: Path):
+    """Open a SessionDB at ``path`` in read-only mode, swallowing stale-schema.
 
-        cur3 = db._conn.execute("""
-            SELECT SUM(input_tokens) as total_input,
-                   SUM(output_tokens) as total_output,
-                   SUM(cache_read_tokens) as total_cache_read,
-                   SUM(reasoning_tokens) as total_reasoning,
-                   COALESCE(SUM(estimated_cost_usd), 0) as total_estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) as total_actual_cost,
-                   COUNT(*) as total_sessions,
-                   SUM(COALESCE(api_call_count, 0)) as total_api_calls
-            FROM sessions WHERE started_at > ?
-        """, (cutoff,))
-        totals = dict(cur3.fetchone())
-        usage = InsightsEngine(db).get_usage_breakdown(days=days)
+    Reuses ``_open_session_db_at_path`` but returns None on failure so the
+    analytics merger can drop a corrupt DB instead of erroring the whole
+    endpoint.
+    """
+    try:
+        return _open_session_db_at_path(path, read_only=True)
+    except Exception as exc:
+        _log.warning(
+            "analytics: failed to open %s in read-only mode (%s); "
+            "skipping that profile's rows", path, exc,
+        )
+        return None
 
-        return {
-            "daily": daily,
-            "by_model": by_model,
-            # Aux-task summary across models (vision, compression, ...). Lets
-            # the dashboard answer "what is compression costing me" directly.
-            "by_task": _aux_task_summary(aux_rows),
-            "totals": totals,
-            "period_days": days,
-            "skills": usage["skills"],
-            # Per-tool-name call counts (already computed by InsightsEngine);
-            # the desktop Capabilities page aggregates these per toolset.
-            "tools": usage["tools"],
-        }
-    finally:
-        db.close()
+
+def _get_usage_analytics(days: int = 30, profile: Optional[str] = None):
+    """Aggregate usage analytics across root + per-profile state DBs.
+
+    Historically this read from a single ``state.db``. After the multiplexed
+    gateway (#88532), each profile's sessions land in ``profiles/<name>/state.db``
+    instead — cron sessions still land in the root DB. A single-DB query
+    therefore misses every WhatsApp/Telegram/Discord chat that ran under a
+    profile scope (Kyros's WhatsApp traffic, all of Wilnice's traffic, etc.).
+
+    This function enumerates the relevant DBs via
+    :func:`_enumerate_profile_state_db_paths`, runs the same SQL against each,
+    and merges the results. The merge key for ``by_model`` includes the
+    ``billing_provider`` so identical model names across providers do not
+    collapse (the per-provider fix already in place for single-DB reads).
+
+    Aux rows, ``daily``, ``totals``, ``by_task`` are simple sums across DBs.
+    Skills and tools are reported from the first DB that yields non-empty
+    data (InsightsEngine depends on a single store and we don't want
+    duplicate / overlapping skill lists to appear in the UI).
+    """
+    from agent.insights import InsightsEngine
+    from hermes_state import _default_db_path
+
+    cutoff = time.time() - (days * 86400)
+    db_paths = _enumerate_profile_state_db_paths(profile)
+    if not db_paths:
+        # Fallback: open the default store so the endpoint never errors
+        db_paths = [Path(_default_db_path())]
+
+    # Merged accumulators
+    daily_by_day: Dict[str, Dict[str, Any]] = {}
+    by_model_map: Dict[Tuple[str, Optional[str]], Dict[str, Any]] = {}
+    aux_rows_all: List[Dict[str, Any]] = []
+    totals: Dict[str, Any] = {
+        "total_input": 0,
+        "total_output": 0,
+        "total_cache_read": 0,
+        "total_reasoning": 0,
+        "total_estimated_cost": 0.0,
+        "total_actual_cost": 0.0,
+        "total_sessions": 0,
+        "total_api_calls": 0,
+    }
+    skills_payload: Optional[Dict[str, Any]] = None
+    tools_payload: Optional[List[Any]] = None
+
+    for db_path in db_paths:
+        db = _open_session_db_read_only(db_path)
+        if db is None:
+            continue
+        try:
+            cur = db._conn.execute(
+                """
+                SELECT date(started_at, 'unixepoch') as day,
+                       SUM(input_tokens) as input_tokens,
+                       SUM(output_tokens) as output_tokens,
+                       SUM(cache_read_tokens) as cache_read_tokens,
+                       SUM(reasoning_tokens) as reasoning_tokens,
+                       COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost,
+                       COALESCE(SUM(actual_cost_usd), 0) as actual_cost,
+                       COUNT(*) as sessions,
+                       SUM(COALESCE(api_call_count, 0)) as api_calls
+                FROM sessions WHERE started_at > ?
+                GROUP BY day ORDER BY day
+                """,
+                (cutoff,),
+            )
+            for row in cur.fetchall():
+                d = dict(row)
+                day = d.get("day")
+                if day is None:
+                    continue
+                bucket = daily_by_day.setdefault(
+                    day,
+                    {
+                        "day": day,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cache_read_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "estimated_cost": 0.0,
+                        "actual_cost": 0.0,
+                        "sessions": 0,
+                        "api_calls": 0,
+                    },
+                )
+                for k in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_read_tokens",
+                    "reasoning_tokens",
+                    "estimated_cost",
+                    "actual_cost",
+                    "sessions",
+                    "api_calls",
+                ):
+                    bucket[k] += d.get(k) or 0
+
+            cur2 = db._conn.execute(
+                """
+                SELECT model,
+                       billing_provider,
+                       SUM(input_tokens) as input_tokens,
+                       SUM(output_tokens) as output_tokens,
+                       COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost,
+                       COUNT(*) as sessions,
+                       SUM(COALESCE(api_call_count, 0)) as api_calls
+                FROM sessions WHERE started_at > ? AND model IS NOT NULL
+                GROUP BY model, billing_provider
+                ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
+                """,
+                (cutoff,),
+            )
+            for row in cur2.fetchall():
+                d = dict(row)
+                key = (d.get("model") or "", d.get("billing_provider"))
+                bucket = by_model_map.setdefault(
+                    key,
+                    {
+                        "model": d.get("model"),
+                        "billing_provider": d.get("billing_provider"),
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "estimated_cost": 0.0,
+                        "sessions": 0,
+                        "api_calls": 0,
+                    },
+                )
+                for k in (
+                    "input_tokens",
+                    "output_tokens",
+                    "estimated_cost",
+                    "sessions",
+                    "api_calls",
+                ):
+                    bucket[k] += d.get(k) or 0
+
+            try:
+                aux_rows = _aux_usage_rows(db, cutoff)
+                aux_rows_all.extend(aux_rows)
+            except Exception as aux_exc:
+                _log.debug(
+                    "analytics: aux_usage_rows failed for %s (%s); "
+                    "continuing without that DB's aux rows",
+                    db_path, aux_exc,
+                )
+
+            cur3 = db._conn.execute(
+                """
+                SELECT COALESCE(SUM(input_tokens), 0) as total_input,
+                       COALESCE(SUM(output_tokens), 0) as total_output,
+                       COALESCE(SUM(cache_read_tokens), 0) as total_cache_read,
+                       COALESCE(SUM(reasoning_tokens), 0) as total_reasoning,
+                       COALESCE(SUM(estimated_cost_usd), 0) as total_estimated_cost,
+                       COALESCE(SUM(actual_cost_usd), 0) as total_actual_cost,
+                       COUNT(*) as total_sessions,
+                       COALESCE(SUM(api_call_count), 0) as total_api_calls
+                FROM sessions WHERE started_at > ?
+                """,
+                (cutoff,),
+            )
+            t = dict(cur3.fetchone())
+            for k in (
+                "total_input",
+                "total_output",
+                "total_cache_read",
+                "total_reasoning",
+                "total_estimated_cost",
+                "total_actual_cost",
+                "total_sessions",
+                "total_api_calls",
+            ):
+                totals[k] = (totals.get(k) or 0) + (t.get(k) or 0)
+
+            # Skills + tools are read from the first DB whose InsightsEngine
+            # returns a non-empty skill list — the insights store is
+            # profile-scoped by design and we don't want every profile's
+            # list concatenated (would inflate counts).
+            if skills_payload is None:
+                try:
+                    usage = InsightsEngine(db).get_usage_breakdown(days=days)
+                    skills_payload = usage.get("skills") or {"items": [], "total": 0}
+                    tools_payload = usage.get("tools") or []
+                except Exception as usage_exc:
+                    _log.debug(
+                        "analytics: InsightsEngine failed for %s (%s); "
+                        "continuing without skills/tools",
+                        db_path, usage_exc,
+                    )
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    daily = sorted(daily_by_day.values(), key=lambda r: r["day"])
+    by_model = sorted(
+        by_model_map.values(),
+        key=lambda r: (r["input_tokens"] or 0) + (r["output_tokens"] or 0),
+        reverse=True,
+    )
+    by_model = _merge_aux_into_by_model(by_model, aux_rows_all)
+
+    return {
+        "daily": daily,
+        "by_model": by_model,
+        "by_task": _aux_task_summary(aux_rows_all),
+        "totals": totals,
+        "period_days": days,
+        "skills": skills_payload or {"items": [], "total": 0},
+        "tools": tools_payload or [],
+        # Diagnostic: let the UI show which DBs contributed so the operator
+        # can confirm multiplexed sessions are being read (was previously
+        # invisible — the dashboard only saw cron rows in the root DB).
+        "sources": [str(p) for p in db_paths],
+    }
 
 
 @app.get("/api/analytics/usage")
@@ -16672,180 +16902,613 @@ async def get_usage_analytics(
     return await asyncio.to_thread(_get_usage_analytics, days, profile)
 
 
+def _aggregate_by_provider(combined_by_model: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Group the multi-DB ``by_model`` rows under their ``billing_provider``.
+
+    Returns a list of provider rollups sorted by total tokens. Empty /
+    NULL billing providers are grouped under a synthetic "(unassigned)"
+    bucket so anonymous rows still show up in the analytics UI rather than
+    being silently dropped.
+    """
+    bucket: Dict[str, Dict[str, Any]] = {}
+    for row in combined_by_model:
+        provider = row.get("billing_provider") or "(unassigned)"
+        entry = bucket.setdefault(
+            provider,
+            {
+                "billing_provider": provider,
+                "display_name": provider,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "estimated_cost": 0.0,
+                "sessions": 0,
+                "api_calls": 0,
+                "models": [],
+                "model_names": [],
+            },
+        )
+        for k in (
+            "input_tokens",
+            "output_tokens",
+            "estimated_cost",
+            "sessions",
+            "api_calls",
+        ):
+            entry[k] += row.get(k) or 0
+        entry["models"].append(
+            {
+                "model": row.get("model"),
+                "input_tokens": row.get("input_tokens") or 0,
+                "output_tokens": row.get("output_tokens") or 0,
+                "estimated_cost": row.get("estimated_cost") or 0,
+                "sessions": row.get("sessions") or 0,
+                "api_calls": row.get("api_calls") or 0,
+            }
+        )
+        if row.get("model"):
+            entry["model_names"].append(row["model"])
+
+    for entry in bucket.values():
+        entry["models"].sort(
+            key=lambda r: (r["input_tokens"] or 0) + (r["output_tokens"] or 0),
+            reverse=True,
+        )
+        entry["model_count"] = len(
+            {m.get("model") for m in entry["models"] if m.get("model")}
+        )
+
+    result = list(bucket.values())
+    result.sort(
+        key=lambda r: (r["input_tokens"] or 0) + (r["output_tokens"] or 0),
+        reverse=True,
+    )
+    return result
+
+
+@app.get("/api/analytics/providers")
+async def get_providers_analytics(
+    days: int = Query(30, ge=1, le=365),
+    profile: Optional[str] = None,
+):
+    """Per-provider rollup derived from the same multi-DB usage scan.
+
+    Reuses the per-model merge and just buckets rows by ``billing_provider``.
+    Same profile filter / clamp behaviour as ``/api/analytics/usage`` —
+    ``profile`` None merges every profile DB, a named profile filters to
+    its state.db only.
+    """
+    usage = await asyncio.to_thread(_get_usage_analytics, days, profile)
+    return {
+        "by_provider": _aggregate_by_provider(usage.get("by_model") or []),
+        "period_days": days,
+        "sources": usage.get("sources") or [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Honcho bridging — read-only endpoints that let the operator's dashboard
+# correlate Honcho peer/session state with the corresponding state.db row.
+#
+# The Honcho REST API is unauthenticated on localhost (local Honcho at
+# http://127.0.0.1:8000, workspace "hermes"). The match heuristic for
+# ``state_db_match`` is intentionally conservative:
+#   1. chat_id == chat_id AND same profile's state.db
+#   2. within a ±60 minute window of the Honcho session's created_at
+#   3. prefer the session whose started_at is closest to created_at
+# Operator-side: never send third-party chat content through here — this
+# endpoint is operator-scoped (admin only) and is intended for accuracy /
+# debugging work, not for surfacing one peer's messages to another.
+# ---------------------------------------------------------------------------
+_HONCHO_DEFAULT_BASE = "http://127.0.0.1:8000"
+_HONCHO_DEFAULT_WORKSPACE = "hermes"
+_HONCHO_MATCH_WINDOW_SECONDS = 3600  # ±60 min
+
+
+def _honcho_fetch(base: str, workspace: str, path: str, *, method: str = "POST", body: Optional[dict] = None) -> Optional[Any]:
+    """Best-effort fetch from the local Honcho REST API. Returns None on any error."""
+    import urllib.request
+    import urllib.error
+    try:
+        data = json.dumps(body or {}).encode()
+        req = urllib.request.Request(
+            f"{base.rstrip('/')}{path}",
+            data=data if method == "POST" else None,
+            method=method,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            raw = r.read()
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _honcho_sessions_for_peer(base: str, workspace: str, peer: str, limit: int) -> List[Dict[str, Any]]:
+    """Fetch a peer's Honcho sessions, newest-first.
+
+    Returns the raw item list from the REST API; each item has ``id``,
+    ``created_at`` (ISO 8601), ``is_active``, and ``metadata`` (a JSON
+    blob including ``owner_peer`` and ``chat_id`` when present).
+    """
+    if not peer:
+        return []
+    payload = _honcho_fetch(
+        base, workspace,
+        f"/v3/workspaces/{workspace}/peers/{urllib_parse_quote(peer)}/sessions",
+        body={},
+    )
+    if not isinstance(payload, dict):
+        return []
+    items = payload.get("items") or []
+    if not isinstance(items, list):
+        return []
+    items.sort(key=lambda s: s.get("created_at") or "", reverse=True)
+    return items[:max(1, min(int(limit or 25), 200))]
+
+
+def _honcho_extract_chat_id(session_id: str, metadata: Optional[Dict[str, Any]]) -> str:
+    """Best-effort: recover the gateway chat_id from a Honcho session.
+
+    Gateway-written session ids encode the chat_id in their tail, e.g.
+    ``agent-main-whatsapp-dm-171666202210553`` → ``171666202210553``.
+    ``agent-main-telegram-dm-7233071505`` → ``7233071505``.
+    The dashboard / state.db stores the canonical ``<id>@<suffix>`` form
+    (e.g. ``171666202210553@lid``) — we still need to LIKE-match, not
+    equality-match.
+    """
+    sid = (session_id or "").strip()
+    if not sid:
+        return ""
+    # Strip the leading ``agent-<profile>-<platform>-`` prefix; the chat id
+    # is whatever remains after the last hyphen. Telegram uses numeric user
+    # ids, WhatsApp uses phone numbers / @lid long-ids, Discord/Slack use
+    # alphanumerics — all are valid match candidates for a LIKE in state.db.
+    if sid.startswith("agent-"):
+        # Strip known channel prefixes
+        for prefix in ("agent-main-whatsapp-dm-", "agent-main-whatsapp-",
+                       "agent-main-telegram-dm-", "agent-main-telegram-",
+                       "agent-main-discord-dm-", "agent-main-discord-",
+                       "agent-main-slack-dm-", "agent-main-slack-",
+                       "agent-kyros-whatsapp-dm-", "agent-wilnice-whatsapp-dm-",
+                       "agent-kyros-telegram-dm-", "agent-wilnice-telegram-dm-"):
+            if sid.startswith(prefix):
+                return sid[len(prefix):]
+        # Fallback: last hyphen-separated segment
+        if "-" in sid:
+            return sid.rsplit("-", 1)[-1]
+    return sid
+
+
+def _state_db_match_for_chat(chat_id: str, honcho_created_at: Optional[str], *, honcho_session_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Find the closest state.db session row for ``chat_id`` in any profile DB.
+
+    Returns a small dict with id, source, profile_name, db_path, started_at
+    when a row is found; otherwise None. Used by the Honcho UI panel so the
+    operator can navigate from a Honcho session to the matching Hermes row.
+    """
+    if not chat_id:
+        return None
+    from datetime import datetime, timezone
+
+    cutoff_dt = None
+    if honcho_created_at:
+        try:
+            cutoff_dt = datetime.fromisoformat(honcho_created_at.replace("Z", "+00:00"))
+        except Exception:
+            cutoff_dt = None
+
+    best: Optional[Tuple[float, Dict[str, Any]]] = None
+    for db_path in _enumerate_profile_state_db_paths():
+        db = _open_session_db_read_only(db_path)
+        if db is None:
+            continue
+        try:
+            # Hermes gateway multiplexed sessions carry their state.db id as
+            # the Honcho session id verbatim (e.g. ``20260822_135536_a2940a``),
+            # so the simplest reliable match is by ``sessions.id``. The
+            # ``chat_id`` LIKE is the fallback for older sessions where the
+            # gateway wrote a different id scheme but the chat_id is still
+            # populated on the row.
+            sql = """
+                SELECT id, source, user_id, session_key, chat_id, profile_name,
+                       display_name, model, started_at, ended_at, end_reason,
+                       message_count
+                FROM sessions
+                WHERE 1=1
+            """
+            params: List[Any] = []
+            clauses: List[str] = []
+            if honcho_session_id:
+                clauses.append("id = ?")
+                params.append(honcho_session_id)
+            if chat_id:
+                clauses.append("(chat_id = ? OR chat_id LIKE ?)")
+                params.extend([chat_id, f"%{chat_id}%"])
+            if clauses:
+                sql += " AND (" + " OR ".join(clauses) + ")"
+            sql += " ORDER BY started_at DESC LIMIT 25"
+
+            cur = db._conn.execute(sql, params)
+            for row in cur.fetchall():
+                d = dict(row)
+                ts = d.get("started_at") or 0
+                if cutoff_dt is not None:
+                    ts_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                    delta = abs((ts_dt - cutoff_dt).total_seconds())
+                    if delta > _HONCHO_MATCH_WINDOW_SECONDS:
+                        continue
+                    score = delta
+                else:
+                    score = 0.0
+                if best is None or score < best[0]:
+                    best = (score, {
+                        "id": d.get("id"),
+                        "source": d.get("source"),
+                        "user_id": d.get("user_id"),
+                        "session_key": d.get("session_key"),
+                        "chat_id": d.get("chat_id"),
+                        "profile_name": d.get("profile_name"),
+                        "display_name": d.get("display_name"),
+                        "model": d.get("model"),
+                        "started_at": ts,
+                        "ended_at": d.get("ended_at"),
+                        "end_reason": d.get("end_reason"),
+                        "message_count": d.get("message_count"),
+                        "db_path": str(db_path),
+                    })
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    return best[1] if best else None
+
+
+def urllib_parse_quote(value: str) -> str:
+    """Local alias to avoid pulling urllib.parse at module import time."""
+    import urllib.parse
+    return urllib.parse.quote(value, safe="")
+
+
+@app.get("/api/honcho/sessions")
+async def honcho_sessions(
+    peer: str = Query(..., description="Honcho peer id (e.g. 'Wilnice', 'Kyros')"),
+    limit: int = Query(25, ge=1, le=200),
+    base: Optional[str] = Query(None, description="Honcho base URL (default local)"),
+    workspace: Optional[str] = Query(None, description="Honcho workspace (default 'hermes')"),
+    match_state_db: bool = Query(True, description="Link each Honcho session to its state.db row"),
+):
+    """Honcho sessions for a peer with optional state.db correlation.
+
+    Used by the dashboard's Honcho bridge page so the operator can see a
+    unified view of one peer's activity across Honcho's semantic memory
+    store and Hermes's durable session DB.
+    """
+    honcho_base = base or _HONCHO_DEFAULT_BASE
+    honcho_ws = workspace or _HONCHO_DEFAULT_WORKSPACE
+    sessions = _honcho_sessions_for_peer(honcho_base, honcho_ws, peer, limit)
+
+    out = []
+    for s in sessions:
+        metadata = s.get("metadata") or {}
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except Exception:
+                metadata = {}
+        # Honcho stores chat_id encoded in the session id (e.g.
+        # ``agent-main-whatsapp-dm-171666202210553``); explicit metadata
+        # ``chat_id`` wins, otherwise we recover it from the suffix.
+        chat_id = (
+            metadata.get("chat_id")
+            or metadata.get("gateway_chat_id")
+            or _honcho_extract_chat_id(s.get("id") or "", metadata)
+        )
+        state_match = None
+        if match_state_db:
+            try:
+                state_match = _state_db_match_for_chat(
+                    chat_id or "",
+                    s.get("created_at"),
+                    honcho_session_id=s.get("id"),
+                )
+            except Exception:
+                state_match = None
+        out.append({
+            "honcho_session_id": s.get("id"),
+            "peer": peer,
+            "created_at": s.get("created_at"),
+            "is_active": s.get("is_active"),
+            "metadata": metadata,
+            "state_db_match": state_match,
+        })
+
+    return {
+        "peer": peer,
+        "honcho_base": honcho_base,
+        "workspace": honcho_ws,
+        "sessions": out,
+        "matched_count": sum(1 for o in out if o["state_db_match"] is not None),
+        "total_count": len(out),
+    }
+
+
+@app.get("/api/honcho/peers")
+async def honcho_peers(
+    base: Optional[str] = Query(None),
+    workspace: Optional[str] = Query(None),
+):
+    """Honcho peers for the dashboard Honcho panel.
+
+    Mirrors the skill honcho-session-retrieval's session listing so the UI
+    doesn't have to know the Honcho REST shape.
+    """
+    honcho_base = base or _HONCHO_DEFAULT_BASE
+    honcho_ws = workspace or _HONCHO_DEFAULT_WORKSPACE
+    payload = _honcho_fetch(
+        honcho_base, honcho_ws,
+        f"/v3/workspaces/{honcho_ws}/peers/list",
+        body={},
+    )
+    if not isinstance(payload, dict):
+        return {"honcho_base": honcho_base, "workspace": honcho_ws, "peers": []}
+    items = payload.get("items") or []
+    return {
+        "honcho_base": honcho_base,
+        "workspace": honcho_ws,
+        "peers": [
+            {"id": p.get("id"), "created_at": p.get("created_at"), "metadata": p.get("metadata")}
+            for p in items if isinstance(p, dict)
+        ],
+    }
+
+
+def _collect_model_rows_from_db(db, cutoff: float) -> List[Dict[str, Any]]:
+    """Run the per-model query and aux-row synthesis for a single DB.
+
+    Returns the raw list of model rows (session-aggregated + aux rows in the
+    same shape) so :func:`_get_models_analytics` can merge across DBs before
+    running its single-model dedup / provider-collapse pass.
+    """
+    cur = db._conn.execute("""
+        SELECT model,
+               billing_provider,
+               SUM(input_tokens) as input_tokens,
+               SUM(output_tokens) as output_tokens,
+               SUM(cache_read_tokens) as cache_read_tokens,
+               SUM(reasoning_tokens) as reasoning_tokens,
+               COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost,
+               COALESCE(SUM(actual_cost_usd), 0) as actual_cost,
+               COUNT(*) as sessions,
+               SUM(COALESCE(api_call_count, 0)) as api_calls,
+               SUM(tool_call_count) as tool_calls,
+               MAX(started_at) as last_used_at,
+               AVG(input_tokens + output_tokens) as avg_tokens_per_session
+        FROM sessions WHERE started_at > ? AND model IS NOT NULL AND model != ''
+        GROUP BY model, billing_provider
+        ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
+    """, (cutoff,))
+    raw_rows = [dict(r) for r in cur.fetchall()]
+
+    for aux in _aux_usage_rows(db, cutoff):
+        raw_rows.append({
+            "model": aux.get("model") or "unknown",
+            "billing_provider": aux.get("billing_provider") or "",
+            "input_tokens": aux.get("input_tokens") or 0,
+            "output_tokens": aux.get("output_tokens") or 0,
+            "cache_read_tokens": aux.get("cache_read_tokens") or 0,
+            "reasoning_tokens": aux.get("reasoning_tokens") or 0,
+            "estimated_cost": aux.get("estimated_cost") or 0,
+            "actual_cost": 0,
+            "sessions": aux.get("sessions") or 0,
+            "api_calls": aux.get("api_calls") or 0,
+            "tool_calls": 0,
+            "last_used_at": aux.get("last_used_at"),
+            "avg_tokens_per_session": 0,
+            "aux_task": aux.get("task") or "",
+        })
+    return raw_rows
+
+
+def _merge_model_rows_across_dbs(
+    all_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Collapse rows from multiple DBs into the dedup / provider-collapse shape.
+
+    Mirrors the logic that used to live inline in :func:`_get_models_analytics`
+    — folds session-only rows into the accounted provider row, then sorts
+    descending by total tokens. Idempotent across DBs because the merge key
+    is (model, billing_provider).
+    """
+    rows_by_model: Dict[str, List[Dict[str, Any]]] = {}
+    for row in all_rows:
+        rows_by_model.setdefault(row.get("model") or "", []).append(row)
+
+    rows: List[Dict[str, Any]] = []
+    for model_rows in rows_by_model.values():
+        provider_rows = [r for r in model_rows if r.get("billing_provider")]
+        if len(provider_rows) == 1:
+            target = provider_rows[0]
+            for row in model_rows:
+                if row is target or row.get("billing_provider"):
+                    continue
+                has_usage = any(
+                    (row.get(key) or 0) != 0
+                    for key in (
+                        "input_tokens",
+                        "output_tokens",
+                        "cache_read_tokens",
+                        "reasoning_tokens",
+                        "estimated_cost",
+                        "actual_cost",
+                        "api_calls",
+                        "tool_calls",
+                    )
+                )
+                if has_usage:
+                    continue
+                target["sessions"] = (target.get("sessions") or 0) + (row.get("sessions") or 0)
+                target["last_used_at"] = max(target.get("last_used_at") or 0, row.get("last_used_at") or 0)
+                total_tokens = (target.get("input_tokens") or 0) + (target.get("output_tokens") or 0)
+                sessions = target.get("sessions") or 0
+                target["avg_tokens_per_session"] = total_tokens / sessions if sessions else 0
+            rows.append(target)
+            rows.extend(
+                r for r in model_rows
+                if r is not target
+                and (r.get("billing_provider") or any(
+                    (r.get(key) or 0) != 0
+                    for key in (
+                        "input_tokens",
+                        "output_tokens",
+                        "cache_read_tokens",
+                        "reasoning_tokens",
+                        "estimated_cost",
+                        "actual_cost",
+                        "api_calls",
+                        "tool_calls",
+                    )
+                ))
+            )
+        else:
+            rows.extend(model_rows)
+
+    rows.sort(
+        key=lambda r: (r.get("input_tokens") or 0) + (r.get("output_tokens") or 0),
+        reverse=True,
+    )
+    return rows
+
+
 def _get_models_analytics(days: int = 30, profile: Optional[str] = None):
     """Rich per-model analytics for the Models dashboard page.
 
     Returns token/cost/session breakdown per model plus capability metadata
     from models.dev (context window, vision, tools, reasoning, etc.).
+
+    Same multi-DB pattern as :func:`_get_usage_analytics`: each profile's
+    state.db is queried separately, the per-DB rows are deduped with the
+    standard session-only-row fold, and the totals are summed across DBs.
     """
-    db = _open_session_db_for_profile(profile, read_only=True)
-    try:
-        cutoff = time.time() - (days * 86400)
+    from hermes_state import _default_db_path
 
-        cur = db._conn.execute("""
-            SELECT model,
-                   billing_provider,
-                   SUM(input_tokens) as input_tokens,
-                   SUM(output_tokens) as output_tokens,
-                   SUM(cache_read_tokens) as cache_read_tokens,
-                   SUM(reasoning_tokens) as reasoning_tokens,
-                   COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) as actual_cost,
-                   COUNT(*) as sessions,
-                   SUM(COALESCE(api_call_count, 0)) as api_calls,
-                   SUM(tool_call_count) as tool_calls,
-                   MAX(started_at) as last_used_at,
-                   AVG(input_tokens + output_tokens) as avg_tokens_per_session
-            FROM sessions WHERE started_at > ? AND model IS NOT NULL AND model != ''
-            GROUP BY model, billing_provider
-            ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
-        """, (cutoff,))
-        raw_rows = [dict(r) for r in cur.fetchall()]
+    cutoff = time.time() - (days * 86400)
+    db_paths = _enumerate_profile_state_db_paths(profile)
+    if not db_paths:
+        db_paths = [Path(_default_db_path())]
 
-        # Add auxiliary usage as (model, provider) rows so aux-only models
-        # (dedicated vision/compression models) appear on the Models page
-        # instead of being invisible (issue #23270). Keyed by
-        # model+billing_provider to match the GROUP BY above.
-        for aux in _aux_usage_rows(db, cutoff):
-            raw_rows.append({
-                "model": aux.get("model") or "unknown",
-                "billing_provider": aux.get("billing_provider") or "",
-                "input_tokens": aux.get("input_tokens") or 0,
-                "output_tokens": aux.get("output_tokens") or 0,
-                "cache_read_tokens": aux.get("cache_read_tokens") or 0,
-                "reasoning_tokens": aux.get("reasoning_tokens") or 0,
-                "estimated_cost": aux.get("estimated_cost") or 0,
-                "actual_cost": 0,
-                "sessions": aux.get("sessions") or 0,
-                "api_calls": aux.get("api_calls") or 0,
-                "tool_calls": 0,
-                "last_used_at": aux.get("last_used_at"),
-                "avg_tokens_per_session": 0,
-                "aux_task": aux.get("task") or "",
-            })
+    all_rows: List[Dict[str, Any]] = []
+    totals = {
+        "distinct_models": 0,
+        "total_input": 0,
+        "total_output": 0,
+        "total_cache_read": 0,
+        "total_reasoning": 0,
+        "total_estimated_cost": 0.0,
+        "total_actual_cost": 0.0,
+        "total_sessions": 0,
+        "total_api_calls": 0,
+    }
+    seen_model_names: Set[str] = set()
 
-        # Session rows can be created before the first billable provider call
-        # finishes. If that early row records only the model name, and a later
-        # row for the same model has real accounting + billing_provider, the
-        # Models page used to show a duplicate "0 tokens / — API calls" card
-        # next to the real provider card. Fold those session-only rows into
-        # the single accounted provider row when the ownership is unambiguous.
-        rows_by_model: Dict[str, List[Dict[str, Any]]] = {}
-        for row in raw_rows:
-            rows_by_model.setdefault(row.get("model") or "", []).append(row)
-
-        rows: List[Dict[str, Any]] = []
-        for model_rows in rows_by_model.values():
-            provider_rows = [r for r in model_rows if r.get("billing_provider")]
-            if len(provider_rows) == 1:
-                target = provider_rows[0]
-                for row in model_rows:
-                    if row is target or row.get("billing_provider"):
-                        continue
-                    has_usage = any(
-                        (row.get(key) or 0) != 0
-                        for key in (
-                            "input_tokens",
-                            "output_tokens",
-                            "cache_read_tokens",
-                            "reasoning_tokens",
-                            "estimated_cost",
-                            "actual_cost",
-                            "api_calls",
-                            "tool_calls",
-                        )
-                    )
-                    if has_usage:
-                        continue
-                    target["sessions"] = (target.get("sessions") or 0) + (row.get("sessions") or 0)
-                    target["last_used_at"] = max(target.get("last_used_at") or 0, row.get("last_used_at") or 0)
-                    total_tokens = (target.get("input_tokens") or 0) + (target.get("output_tokens") or 0)
-                    sessions = target.get("sessions") or 0
-                    target["avg_tokens_per_session"] = total_tokens / sessions if sessions else 0
-                rows.append(target)
-                rows.extend(
-                    r for r in model_rows
-                    if r is not target
-                    and (r.get("billing_provider") or any(
-                        (r.get(key) or 0) != 0
-                        for key in (
-                            "input_tokens",
-                            "output_tokens",
-                            "cache_read_tokens",
-                            "reasoning_tokens",
-                            "estimated_cost",
-                            "actual_cost",
-                            "api_calls",
-                            "tool_calls",
-                        )
-                    ))
-                )
-            else:
-                rows.extend(model_rows)
-
-        rows.sort(
-            key=lambda r: (r.get("input_tokens") or 0) + (r.get("output_tokens") or 0),
-            reverse=True,
-        )
-
-        models = []
-        for row in rows:
-            provider = row.get("billing_provider") or ""
-            model_name = row["model"]
-            caps = {}
+    for db_path in db_paths:
+        db = _open_session_db_read_only(db_path)
+        if db is None:
+            continue
+        try:
             try:
-                from agent.models_dev import get_model_capabilities
-                mc = get_model_capabilities(provider=provider, model=model_name)
-                if mc is not None:
-                    caps = {
-                        "supports_tools": mc.supports_tools,
-                        "supports_vision": mc.supports_vision,
-                        "supports_reasoning": mc.supports_reasoning,
-                        "context_window": mc.context_window,
-                        "max_output_tokens": mc.max_output_tokens,
-                        "model_family": mc.model_family,
-                    }
+                all_rows.extend(_collect_model_rows_from_db(db, cutoff))
+            except Exception as qexc:
+                _log.debug(
+                    "models: per-DB query failed for %s (%s); "
+                    "skipping that profile's rows",
+                    db_path, qexc,
+                )
+                continue
+
+            totals_cur = db._conn.execute("""
+                SELECT COUNT(DISTINCT model) as distinct_models,
+                       SUM(input_tokens) as total_input,
+                       SUM(output_tokens) as total_output,
+                       SUM(cache_read_tokens) as total_cache_read,
+                       SUM(reasoning_tokens) as total_reasoning,
+                       COALESCE(SUM(estimated_cost_usd), 0) as total_estimated_cost,
+                       COALESCE(SUM(actual_cost_usd), 0) as total_actual_cost,
+                       COUNT(*) as total_sessions,
+                       SUM(COALESCE(api_call_count, 0)) as total_api_calls
+                FROM sessions WHERE started_at > ? AND model IS NOT NULL AND model != ''
+            """, (cutoff,))
+            t = dict(totals_cur.fetchone())
+            # distinct_models is COUNT(DISTINCT) per DB; the unioned answer
+            # is captured later from the merged rows so we skip summing it.
+            for k in (
+                "total_input",
+                "total_output",
+                "total_cache_read",
+                "total_reasoning",
+                "total_estimated_cost",
+                "total_actual_cost",
+                "total_sessions",
+                "total_api_calls",
+            ):
+                totals[k] = (totals.get(k) or 0) + (t.get(k) or 0)
+        finally:
+            try:
+                db.close()
             except Exception:
                 pass
 
-            models.append({
-                "model": model_name,
-                "provider": provider,
-                "input_tokens": row["input_tokens"],
-                "output_tokens": row["output_tokens"],
-                "cache_read_tokens": row["cache_read_tokens"],
-                "reasoning_tokens": row["reasoning_tokens"],
-                "estimated_cost": row["estimated_cost"],
-                "actual_cost": row["actual_cost"],
-                "sessions": row["sessions"],
-                "api_calls": row["api_calls"],
-                "tool_calls": row["tool_calls"],
-                "last_used_at": row["last_used_at"],
-                "avg_tokens_per_session": row["avg_tokens_per_session"],
-                "capabilities": caps,
-            })
+    rows = _merge_model_rows_across_dbs(all_rows)
+    totals["distinct_models"] = sum(
+        1 for r in rows if r.get("billing_provider")
+    )
 
-        totals_cur = db._conn.execute("""
-            SELECT COUNT(DISTINCT model) as distinct_models,
-                   SUM(input_tokens) as total_input,
-                   SUM(output_tokens) as total_output,
-                   SUM(cache_read_tokens) as total_cache_read,
-                   SUM(reasoning_tokens) as total_reasoning,
-                   COALESCE(SUM(estimated_cost_usd), 0) as total_estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) as total_actual_cost,
-                   COUNT(*) as total_sessions,
-                   SUM(COALESCE(api_call_count, 0)) as total_api_calls
-            FROM sessions WHERE started_at > ? AND model IS NOT NULL AND model != ''
-        """, (cutoff,))
-        totals = dict(totals_cur.fetchone())
+    models = []
+    for row in rows:
+        provider = row.get("billing_provider") or ""
+        model_name = row["model"]
+        caps = {}
+        try:
+            from agent.models_dev import get_model_capabilities
+            mc = get_model_capabilities(provider=provider, model=model_name)
+            if mc is not None:
+                caps = {
+                    "supports_tools": mc.supports_tools,
+                    "supports_vision": mc.supports_vision,
+                    "supports_reasoning": mc.supports_reasoning,
+                    "context_window": mc.context_window,
+                    "max_output_tokens": mc.max_output_tokens,
+                    "model_family": mc.model_family,
+                }
+        except Exception:
+            pass
 
-        return {
-            "models": models,
-            "totals": totals,
-            "period_days": days,
-        }
-    finally:
-        db.close()
+        models.append({
+            "model": model_name,
+            "provider": provider,
+            "input_tokens": row["input_tokens"],
+            "output_tokens": row["output_tokens"],
+            "cache_read_tokens": row["cache_read_tokens"],
+            "reasoning_tokens": row["reasoning_tokens"],
+            "estimated_cost": row["estimated_cost"],
+            "actual_cost": row["actual_cost"],
+            "sessions": row["sessions"],
+            "api_calls": row["api_calls"],
+            "tool_calls": row["tool_calls"],
+            "last_used_at": row["last_used_at"],
+            "avg_tokens_per_session": row["avg_tokens_per_session"],
+            "capabilities": caps,
+        })
+
+    return {
+        "models": models,
+        "totals": totals,
+        "period_days": days,
+        "sources": [str(p) for p in db_paths],
+    }
 
 
 @app.get("/api/analytics/models")
