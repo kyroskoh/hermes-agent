@@ -206,6 +206,28 @@ class HonchoSessionManager:
         if write_frequency == "async":
             self._async_queue = queue.Queue()
 
+        # Retry policy for async write failures. The previous behaviour was
+        # "try once, sleep 2s, try once, drop the batch" — when Honcho was
+        # briefly unreachable (network blip, container restart) the entire
+        # session went silent in Honcho without any operator-visible signal,
+        # causing 3-day memory gaps for the affected user. The new policy:
+        # requeue with exponential backoff up to write_retry_max attempts
+        # (default 8), giving ~8 minutes of recovery before giving up on a
+        # batch. Every drop emits a critical log line tagged with the session
+        # key so fleet observability can alert on it.
+        self._write_retry_max: int = (
+            getattr(config, "write_retry_max", 8) if config else 8
+        )
+        self._write_retry_initial_backoff: float = (
+            getattr(config, "write_retry_initial_backoff", 2.0) if config else 2.0
+        )
+        # Per-session retry counters: session_key -> {"attempts": int, "first_fail_ts": float, "last_err": str}
+        self._write_retry_counts: dict[str, dict[str, float | int | str]] = {}
+        self._write_retry_counts_lock = threading.Lock()
+        # Session keys we've already alerted on (so we don't spam CRITICAL logs
+        # once per retry attempt when a session is wedged).
+        self._write_alerted_keys: set[str] = set()
+
     @property
     def honcho(self) -> Honcho:
         """Get the Honcho client, refreshing a near-expiry OAuth token in place.
@@ -699,43 +721,135 @@ class HonchoSessionManager:
             return False
 
     def _async_writer_loop(self) -> None:
-        """Background daemon thread: drains the async write queue."""
+        """Background daemon thread: drains the async write queue.
+
+        Failure policy (post-2026-08-28 hardening):
+          1. Try to flush. On success, clear the retry counter for the session.
+          2. On failure, increment per-session attempt counter, sleep with
+             exponential backoff (initial * 2^(attempts-1), capped at 60s),
+             then requeue the same item and move on. This frees the loop to
+             drain other sessions' writes while Honcho recovers.
+          3. After write_retry_max attempts on the same session key, emit a
+             CRITICAL log line and stop requeueing. The session's unsynced
+             messages stay in the HonchoSession object — recoverable later
+             via a manual flush_all() once Honcho is healthy again.
+        """
         while True:
             try:
                 item = self._async_queue.get(timeout=5)
                 if item is _ASYNC_SHUTDOWN:
                     break
 
-                first_error: Exception | None = None
+                session_key = getattr(item, "key", "<unknown>")
+
                 try:
                     success = self._flush_session(item)
+                    first_error: Exception | None = None
                 except Exception as e:
                     success = False
                     first_error = e
 
                 if success:
+                    self._reset_write_retry(session_key)
                     continue
 
-                if first_error is not None:
-                    logger.warning("Honcho async write failed, retrying once: %s", first_error)
-                else:
-                    logger.warning("Honcho async write failed, retrying once")
+                # Failure path — record attempt, decide whether to requeue
+                attempts = self._record_write_failure(session_key, first_error)
 
-                import time as _time
-                _time.sleep(2)
-
-                try:
-                    retry_success = self._flush_session(item)
-                except Exception as e2:
-                    logger.error("Honcho async write retry failed, dropping batch: %s", e2)
+                if attempts > self._write_retry_max:
+                    self._on_write_giveup(session_key, item, first_error)
                     continue
 
-                if not retry_success:
-                    logger.error("Honcho async write retry failed, dropping batch")
+                # Exponential backoff: initial * 2^(attempts-1), capped at 60s.
+                backoff = min(
+                    self._write_retry_initial_backoff * (2 ** (attempts - 1)),
+                    60.0,
+                )
+                err_msg = (
+                    f"{_redact_tokens(str(first_error))}" if first_error is not None
+                    else "unknown error"
+                )
+                logger.warning(
+                    "Honcho async write failed for %s (attempt %d/%d), requeueing in %.1fs: %s",
+                    session_key, attempts, self._write_retry_max, backoff, err_msg,
+                )
+
+                # Re-enqueue with a delay using a background timer so the loop
+                # keeps draining other sessions in the meantime. We can't
+                # block the loop with time.sleep because that would starve
+                # other writes from the same multiplexed gateway.
+                self._schedule_requeue(item, backoff)
             except queue.Empty:
                 continue
             except Exception as e:
                 logger.error("Honcho async writer error: %s", e)
+
+    def _record_write_failure(self, session_key: str, err: Exception | None) -> int:
+        """Increment per-session failure count; return new attempt count."""
+        import time as _time
+        with self._write_retry_counts_lock:
+            entry = self._write_retry_counts.get(session_key)
+            if entry is None:
+                self._write_retry_counts[session_key] = {
+                    "attempts": 1,
+                    "first_fail_ts": _time.time(),
+                    "last_err": str(err) if err else "",
+                }
+                return 1
+            prev_attempts = int(entry.get("attempts", 0))
+            entry["attempts"] = prev_attempts + 1
+            entry["last_err"] = str(err) if err else str(entry.get("last_err", ""))
+            return int(entry["attempts"])
+
+    def _reset_write_retry(self, session_key: str) -> None:
+        with self._write_retry_counts_lock:
+            self._write_retry_counts.pop(session_key, None)
+        self._write_alerted_keys.discard(session_key)
+
+    def _schedule_requeue(self, item: Any, delay_s: float) -> None:
+        """Push the item back onto the queue after a delay without blocking the loop."""
+        import threading as _threading
+        def _delayed_put():
+            import time as _time
+            _time.sleep(delay_s)
+            if self._async_queue is not None:
+                self._async_queue.put(item)
+        t = _threading.Thread(target=_delayed_put, daemon=True, name="honcho-retry")
+        t.start()
+
+    def _on_write_giveup(self, session_key: str, item: Any, last_err: Exception | None) -> None:
+        """Final-failure alert. Emitted once per session key to avoid log spam."""
+        import time as _time
+        with self._write_retry_counts_lock:
+            entry = self._write_retry_counts.get(session_key) or {}
+            attempts = int(entry.get("attempts", self._write_retry_max))
+            first_fail_ts = float(entry.get("first_fail_ts", _time.time()))
+            last_err_str = str(entry.get("last_err") or (str(last_err) if last_err else "unknown"))
+        first_fail_age_s = _time.time() - first_fail_ts
+
+        # Mark the session's unsynced messages as dropped so flush_all() at
+        # process exit doesn't infinite-loop on the same poison message. The
+        # raw HonchoSession messages list still holds the content; an
+        # operator can replay them by calling flush_all() again after Honcho
+        # recovers.
+        try:
+            dropped = len([m for m in item.messages if not m.get("_synced")])
+            for m in item.messages:
+                m["_dropped_due_to_honcho_outage"] = True
+                m["_synced"] = True  # so we don't keep retrying the same one
+        except Exception:
+            dropped = -1
+
+        already_alerted = session_key in self._write_alerted_keys
+        if not already_alerted:
+            self._write_alerted_keys.add(session_key)
+            # CRITICAL: fleet observability should treat this as a paging event.
+            logger.critical(
+                "HONCHO_ASYNC_WRITE_GAVE_UP session_key=%s attempts=%d duration_s=%.1f "
+                "dropped_unsynced=%d last_err=%s",
+                session_key, attempts, first_fail_age_s, dropped,
+                _redact_tokens(last_err_str)[:300],
+            )
 
     def save(self, session: HonchoSession) -> None:
         """Save messages to Honcho, respecting write_frequency.

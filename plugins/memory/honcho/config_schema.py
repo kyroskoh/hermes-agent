@@ -195,6 +195,31 @@ CONFIG_SCHEMA = ProviderConfigSchema(
             placeholder="async | turn | session | N",
             group="Message writing",
         ),
+        ProviderField(
+            key="writeRetryMax",
+            label="Write retry max attempts",
+            kind=KIND_NUMBER,
+            default="8",
+            description=(
+                "Maximum attempts to retry a failed async Honcho write before "
+                "giving up. With the default initial backoff of 2s, this gives "
+                "about 4 minutes of recovery before paging the operator."
+            ),
+            placeholder="8",
+            group="Message writing",
+        ),
+        ProviderField(
+            key="writeRetryInitialBackoff",
+            label="Write retry initial backoff (s)",
+            kind=KIND_NUMBER,
+            default="2.0",
+            description=(
+                "Initial wait before the first async write retry. Each "
+                "subsequent retry doubles the wait, capped at 60s."
+            ),
+            placeholder="2.0",
+            group="Message writing",
+        ),
         # — Dialectic —
         ProviderField(
             key="dialecticReasoningLevel",
