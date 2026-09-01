@@ -79,10 +79,6 @@ const PROFILE_SCOPED_PREFIXES = [
   "/api/messaging/platforms",
   "/api/messaging/telegram/onboarding",
   "/api/messaging/whatsapp/onboarding",
-  // OAuth/account state is profile-owned too: status, login sessions, polling,
-  // cancellation, and disconnect must all follow the selected management
-  // profile rather than silently targeting the dashboard process's profile.
-  "/api/providers/oauth",
   "/api/model/info",
   "/api/model/set",
   "/api/model/auxiliary",
@@ -2156,11 +2152,6 @@ export interface WhatsAppOnboardingApplyResponse {
 }
 
 export interface SessionMessage {
-  /** Local SQLite message row id, useful for session_search anchors. */
-  id?: number;
-  /** External platform id, when the gateway persisted one. */
-  message_id?: string;
-  platform_message_id?: string;
   role: "user" | "assistant" | "system" | "tool";
   content: string | null;
   tool_calls?: Array<{
@@ -2170,9 +2161,6 @@ export interface SessionMessage {
   tool_name?: string;
   tool_call_id?: string;
   timestamp?: number;
-  /** Presentation-only timeline marker, excluded from model context. */
-  display_kind?: string;
-  display_metadata?: Record<string, unknown>;
 }
 
 export interface SessionMessagesResponse {
@@ -2262,6 +2250,15 @@ export interface AnalyticsModelEntry {
   }>;
 }
 
+export interface AnalyticsProviderModelEntry {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  sessions: number;
+  estimated_cost: number;
+  api_calls: number;
+}
+
 export interface AnalyticsProviderEntry {
   billing_provider: string;
   display_name: string;
@@ -2270,7 +2267,11 @@ export interface AnalyticsProviderEntry {
   estimated_cost: number;
   sessions: number;
   api_calls: number;
-  models: string[];
+  // FORK: kyroskoh/hermes-agent — nested per-model breakdown so each
+  // provider row shows which models under it are the heavy hitters.
+  models: AnalyticsProviderModelEntry[];
+  // Back-compat string[] for any consumer that just wants model names.
+  model_names?: string[];
   model_count: number;
 }
 
