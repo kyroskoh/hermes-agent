@@ -183,6 +183,7 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/personality": lazy(() => import("@/fork/pages/PersonalityPage")),
   "/backups": lazy(() => import("@/fork/pages/BackupsPage")),
   "/fallback": lazy(() => import("@/fork/pages/FallbackPage")),
+  "/honcho": lazy(() => import("@/fork/pages/HonchoPage")),
 };
 
 // Route placeholder for /chat.  The persistent ChatPage host (rendered
@@ -247,6 +248,11 @@ const BUILTIN_NAV_REST: NavItem[] = [
     path: "/backups",
     label: "Backups",
     icon: FolderOpen,
+  },
+  {
+    path: "/honcho",
+    label: "Honcho",
+    icon: Database,
   },
 ];
 
