@@ -160,30 +160,21 @@ def _exec_help(ctx: CommandContext) -> CommandReply:
     from agent.i18n import t
     from hermes_cli.commands import gateway_help_lines
 
-    allowed_commands = ctx.options.get("allowed_commands")
-
     lines = [
         t("gateway.help.header"),
-        *gateway_help_lines(allowed_commands=allowed_commands),
+        *gateway_help_lines(),
     ]
     try:
         from agent.skill_commands import get_skill_commands
         skill_cmds = get_skill_commands()
         if skill_cmds:
-            # If user has gated command list, only show skills they are allowed to run
-            if allowed_commands is not None:
-                skill_cmds = {
-                    cmd: meta for cmd, meta in skill_cmds.items()
-                    if cmd.lstrip("/") in allowed_commands
-                }
-            if skill_cmds:
-                lines.append(t("gateway.help.skill_header", count=len(skill_cmds)))
-                # Show first 10, then point to /commands for the rest
-                sorted_cmds = sorted(skill_cmds)
-                for cmd in sorted_cmds[:10]:
-                    lines.append(f"`{cmd}` — {skill_cmds[cmd]['description']}")
-                if len(sorted_cmds) > 10:
-                    lines.append(t("gateway.help.more_use_commands", count=len(sorted_cmds) - 10))
+            lines.append(t("gateway.help.skill_header", count=len(skill_cmds)))
+            # Show first 10, then point to /commands for the rest
+            sorted_cmds = sorted(skill_cmds)
+            for cmd in sorted_cmds[:10]:
+                lines.append(f"`{cmd}` — {skill_cmds[cmd]['description']}")
+            if len(sorted_cmds) > 10:
+                lines.append(t("gateway.help.more_use_commands", count=len(sorted_cmds) - 10))
     except Exception:
         pass
     return CommandReply("\n".join(lines), format="markdown")
@@ -198,8 +189,6 @@ def _exec_commands(ctx: CommandContext) -> CommandReply:
     from agent.i18n import t
     from hermes_cli.commands import gateway_help_lines
 
-    allowed_commands = ctx.options.get("allowed_commands")
-
     raw_args = (ctx.args or "").strip()
     if raw_args:
         try:
@@ -210,22 +199,16 @@ def _exec_commands(ctx: CommandContext) -> CommandReply:
         requested_page = 1
 
     # Build combined entry list: built-in commands + skill commands
-    entries = list(gateway_help_lines(allowed_commands=allowed_commands))
+    entries = list(gateway_help_lines())
     try:
         from agent.skill_commands import get_skill_commands
         skill_cmds = get_skill_commands()
         if skill_cmds:
-            if allowed_commands is not None:
-                skill_cmds = {
-                    cmd: meta for cmd, meta in skill_cmds.items()
-                    if cmd.lstrip("/") in allowed_commands
-                }
-            if skill_cmds:
-                entries.append("")
-                entries.append(t("gateway.commands.skill_header"))
-                for cmd in sorted(skill_cmds):
-                    desc = skill_cmds[cmd].get("description", "").strip() or t("gateway.commands.default_desc")
-                    entries.append(f"`{cmd}` — {desc}")
+            entries.append("")
+            entries.append(t("gateway.commands.skill_header"))
+            for cmd in sorted(skill_cmds):
+                desc = skill_cmds[cmd].get("description", "").strip() or t("gateway.commands.default_desc")
+                entries.append(f"`{cmd}` — {desc}")
     except Exception:
         pass
 

@@ -173,16 +173,6 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/config": ConfigPage,
   "/env": EnvPage,
   "/docs": DocsPage,
-  // FORK: kyroskoh/hermes-agent — fork-owned routes mounted from
-  // web/src/fork/. Lazy-imported so they don't tax the dashboard shell.
-  // If you add a new fork page, append it here and add a sidebar entry
-  // in BUILTIN_NAV_REST. The rebase surface is this one block + 3
-  // nav entries; everything else stays under web/src/fork/.
-  // Cache buster: 2026-08-24T23:55Z (forces fresh fetch after SPA shell
-  // rebases when fork pages change).
-  "/personality": lazy(() => import("@/fork/pages/PersonalityPage")),
-  "/backups": lazy(() => import("@/fork/pages/BackupsPage")),
-  "/fallback": lazy(() => import("@/fork/pages/FallbackPage")),
 };
 
 // Route placeholder for /chat.  The persistent ChatPage host (rendered
@@ -230,23 +220,6 @@ const BUILTIN_NAV_REST: NavItem[] = [
     labelKey: "documentation",
     label: "Documentation",
     icon: BookOpen,
-  },
-  // FORK: kyroskoh/hermes-agent — fork-owned sidebar entries. Routes
-  // live under web/src/fork/pages/ and are mounted in BUILTIN_ROUTES_CORE.
-  {
-    path: "/fallback",
-    label: "Fallback",
-    icon: ShieldCheck,
-  },
-  {
-    path: "/personality",
-    label: "Personality",
-    icon: Sparkles,
-  },
-  {
-    path: "/backups",
-    label: "Backups",
-    icon: FolderOpen,
   },
 ];
 

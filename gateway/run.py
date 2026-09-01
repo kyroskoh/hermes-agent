@@ -2804,8 +2804,6 @@ _CONVERSATION_SCOPED_STATE: tuple = (
     # and run_sync) must not leak into a future conversation's first user
     # message — session keys are source-derived and REUSED.
     "_pending_turn_sidecar_notes",
-    # Last emitted fallback notice line.
-    "_last_fallback_notice",
 )
 
 # Sentinel for "caller did not pass metadata" vs "caller passed None".
@@ -5315,18 +5313,6 @@ class TurnRunner:
         ctx = self._ctx
         if not ctx._status_adapter or not ctx._run_still_current():
             return
-
-        # Deduplicate repeat fallback switch messages if model hasn't changed
-        if "Switched to fallback model" in str(message or ""):
-            session_key = str(ctx.session_key or "")
-            state = self._runner._peek_session_state(session_key) if session_key else None
-            last_fb = state.conversation.last_fallback_notice if state else None
-            if last_fb == message:
-                logger.debug("Suppressing duplicate fallback notice: %s", message)
-                return
-            if state:
-                state.conversation.last_fallback_notice = message
-
         prepared_message = _prepare_gateway_status_message(
             ctx.source.platform,
             event_type,
