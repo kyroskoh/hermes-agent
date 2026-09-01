@@ -114,3 +114,105 @@ def test_failed_reauth_rollback_preserves_newer_oauth_state(tmp_path, monkeypatc
     storage.restore(backup, only_if_absent=True)
 
     assert storage._tokens_path().read_text() == "FRESH"
+
+
+def test_dashboard_flow_propagates_iss_through_callback():
+    """RFC 9207 ``iss`` is required by modern MCP servers (Cloudflare,
+    Atlassian, Notion, GitHub MCP). The dashboard-relay path used to drop
+    it on the floor — verify it now flows through.
+    """
+    from tools.mcp_dashboard_oauth import DashboardOAuthFlow
+
+    flow = DashboardOAuthFlow(
+        flow_id="flow-iss",
+        server_name="cloudflare",
+        profile=None,
+        hermes_home="/tmp/hermes-test",
+        redirect_uri="https://agent.example/mcp/oauth/callback/cloudflare",
+    )
+
+    asyncio.run(flow.publish_authorization_url("https://mcp.cloudflare.com/authorize?state=iss-state"))
+
+    flow.deliver_callback(
+        code="code-iss",
+        state="iss-state",
+        error=None,
+        iss="https://mcp.cloudflare.com",
+    )
+
+    code, state, iss = asyncio.run(flow.wait_for_callback_full())
+    assert (code, state, iss) == ("code-iss", "iss-state", "https://mcp.cloudflare.com")
+
+    # Legacy tuple shape must still work for older callers.
+    assert asyncio.run(flow.wait_for_callback()) == ("code-iss", "iss-state")
+
+
+def test_dashboard_flow_iss_defaults_to_none_when_absent():
+    """If the authorization server didn't append ``iss`` (or it got
+    dropped by an older dashboard), the SDK still receives ``iss=None`` —
+    which is exactly what the legacy behaviour produced, so this is a no-op
+    for non-RFC-9207 providers.
+    """
+    from tools.mcp_dashboard_oauth import DashboardOAuthFlow
+
+    flow = DashboardOAuthFlow(
+        flow_id="flow-no-iss",
+        server_name="legacy",
+        profile=None,
+        hermes_home="/tmp/hermes-test",
+        redirect_uri="https://agent.example/mcp/oauth/callback/legacy",
+    )
+
+    asyncio.run(flow.publish_authorization_url("https://idp.example/authorize?state=legacy-state"))
+
+    flow.deliver_callback(code="code-legacy", state="legacy-state", error=None)
+
+    assert asyncio.run(flow.wait_for_callback_full()) == ("code-legacy", "legacy-state", None)
+
+
+def test_mcp_oauth_callback_waiter_surfaces_dashboard_iss_to_sdk():
+    """End-to-end: dashboard delivers a callback carrying ``iss`` and the
+    SDK-shaped result the consumer hands back contains it. This is the exact
+    Cloudflare regression — without this, the SDK raises
+    ``Authorization response missing iss parameter advertised by the
+    authorization server``.
+    """
+    from tools.mcp_dashboard_oauth import DashboardOAuthFlow, dashboard_oauth_flow
+    from tools.mcp_oauth import (
+        HermesTokenStorage,
+        _build_client_metadata,
+        _configure_callback_port,
+        _make_callback_waiter,
+        _make_redirect_handler,
+    )
+
+    flow = DashboardOAuthFlow(
+        flow_id="flow-iss-sdk",
+        server_name="cloudflare",
+        profile=None,
+        hermes_home="/tmp/hermes-test",
+        redirect_uri="https://agent.example/mcp/oauth/callback/cloudflare",
+    )
+    cfg = {}
+    with dashboard_oauth_flow(flow):
+        _configure_callback_port(cfg, HermesTokenStorage("cloudflare"))
+        _build_client_metadata(cfg)
+        asyncio.run(
+            _make_redirect_handler(0)(
+                "https://mcp.cloudflare.com/authorize?state=cloudflare-state"
+            )
+        )
+        flow.deliver_callback(
+            code="code-cloud",
+            state="cloudflare-state",
+            error=None,
+            iss="https://mcp.cloudflare.com",
+        )
+        result = asyncio.run(_make_callback_waiter(0)())
+
+        # mcp 2.0's AuthorizationCodeResult carries iss as a top-level field
+        # that the SDK validator then compares against the discovered
+        # metadata. Verify the dashboard-relay path now produces it.
+        assert result.code == "code-cloud"
+        assert result.state == "cloudflare-state"
+        assert result.iss == "https://mcp.cloudflare.com"

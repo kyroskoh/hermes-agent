@@ -335,10 +335,18 @@ async def cancel_mcp_oauth_flow(flow_id: str, request: Request):
 @router.get("/api/mcp/oauth/callback/{server_name:path}")
 async def mcp_oauth_callback(
     server_name: str,
+    request: Request,
     code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
 ):
+    # RFC 9207 authorization-response issuer. Modern MCP servers
+    # (Cloudflare, Atlassian, Notion, GitHub MCP, ...) append ``iss`` to the
+    # redirect and the MCP SDK rejects the callback when it's missing.
+    # Query-param access here (rather than the function signature) keeps the
+    # route signature backwards-compatible with the deployed dashboard SPA
+    # which calls this exact path.
+    iss = request.query_params.get("iss")
     _gc_mcp_oauth_flows()
     with _mcp_oauth_flows_lock:
         candidates = [
@@ -360,7 +368,7 @@ async def mcp_oauth_callback(
     if flow is None:
         return HTMLResponse("<h1>OAuth flow expired</h1><p>Return to Hermes and try again.</p>", status_code=404)
     try:
-        flow.deliver_callback(code=code, state=state, error=error)
+        flow.deliver_callback(code=code, state=state, error=error, iss=iss)
     except ValueError as exc:
         reason = str(exc)
         status_code = 409 if "already received" in reason else 400
