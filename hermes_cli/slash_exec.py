@@ -189,6 +189,37 @@ def _exec_help(ctx: CommandContext) -> CommandReply:
     return CommandReply("\n".join(lines), format="markdown")
 
 
+def _exec_reload(ctx: CommandContext) -> CommandReply:
+    """Reload cached module-level lookups without restarting the gateway.
+
+    Calls ``gateway.lookups.rebuild_lookups()`` which re-imports
+    ``hermes_cli.commands`` (rebuilding ``COMMAND_REGISTRY`` and
+    ``GATEWAY_KNOWN_COMMANDS`` from the current source), plus skill
+    commands and profile-routing helpers. After ``/reload`` runs, the
+    gateway recognises any new slash-command aliases without a restart.
+
+    The CLI/TUI single-user surfaces get the same effect on next
+    invocation (they re-import on every run), so this command is a
+    no-op there. The gateway runner is the consumer that benefits.
+    """
+    try:
+        from gateway.lookups import rebuild_lookups
+    except ImportError as exc:
+        return CommandReply(
+            f"reload unavailable: gateway.lookups module missing ({exc})",
+            format="plain",
+        )
+
+    verbose = bool(getattr(ctx, "options", {}).get("verbose", False))
+    try:
+        log = rebuild_lookups(verbose=verbose)
+    except Exception as exc:  # pragma: no cover - defensive
+        return CommandReply(f"reload failed: {exc}", format="plain")
+
+    body = "\n".join(f"• {line}" for line in log) or "no changes"
+    return CommandReply(f"🔄 Reloaded.\n{body}", format="markdown")
+
+
 def _exec_commands(ctx: CommandContext) -> CommandReply:
     """Core gateway /commands body — paginated command + skill listing.
 
@@ -270,6 +301,7 @@ EXECUTORS: dict[str, Callable[[CommandContext], CommandReply]] = {
     "bundles": _exec_bundles,
     "gateway_help": _exec_help,
     "gateway_commands": _exec_commands,
+    "reload": _exec_reload,
 }
 
 

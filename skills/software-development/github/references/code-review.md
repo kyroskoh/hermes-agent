@@ -29,6 +29,13 @@ OWNER=$(echo "$OWNER_REPO" | cut -d/ -f1)
 REPO=$(echo "$OWNER_REPO" | cut -d/ -f2)
 ```
 
+> **Recommended**: `source ~/.hermes/skills/github/github-auth/scripts/gh-env.sh`
+> instead of running the inline block above. `gh-env.sh` automatically
+> detects the GitHub App credentials (see `github-app-auth` skill) and
+> exports a short-lived installation token — every `gh pr review`,
+> `gh pr comment`, and `curl` against `api.github.com` is then attributed
+> to `<github-app-name>[bot]` instead of your personal account.
+
 ---
 
 ## 1. Reviewing Local Changes (Pre-Push)
@@ -459,6 +466,43 @@ EOF
 ```bash
 git checkout main
 git branch -D pr-$PR_NUMBER
+```
+
+### Avoiding duplicate findings on `synchronize`
+
+When a developer pushes a new commit, GitHub re-fires the `pull_request`
+webhook with `action: synchronize`. Without deduplication, Hermes would
+re-post the same review on every push.
+
+Use the dedup helper to record a fingerprint of the posted findings:
+
+```bash
+DEDUP="${HERMES_HOME:-$HOME/.hermes}/skills/github/github-app-auth/scripts/pr-review-dedup.py"
+
+# Build a JSON array of {path, line, body} triples from your findings.
+FINDINGS_JSON='[
+  {"path":"src/auth.py","line":45,"body":"Use parameterized queries"},
+  {"path":"src/models.py","line":23,"body":"Hash passwords"}
+]'
+
+HEAD_SHA=$(gh pr view $PR_NUMBER --json headRefOid --jq '.headRefOid')
+python3 "$DEDUP" record \
+  --owner "$GH_OWNER" --repo "$GH_REPO" --pr "$PR_NUMBER" \
+  --head-sha "$HEAD_SHA" --verdict "REQUEST_CHANGES" \
+  --findings-json "$FINDINGS_JSON"
+```
+
+On a subsequent `synchronize`, check before posting:
+
+```bash
+if python3 "$DEDUP" is-duplicate \
+     --owner "$GH_OWNER" --repo "$GH_REPO" --pr "$PR_NUMBER" \
+     --head-sha "$HEAD_SHA" \
+     --findings-json "$NEW_FINDINGS_JSON"; then
+  echo "Same findings as the previous review — skipping."
+  exit 0
+fi
+# Otherwise, post the review and update the fingerprint.
 ```
 
 ### Decision: Approve vs Request Changes vs Comment

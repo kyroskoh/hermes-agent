@@ -2156,6 +2156,11 @@ export interface WhatsAppOnboardingApplyResponse {
 }
 
 export interface SessionMessage {
+  /** Local SQLite message row id, useful for session_search anchors. */
+  id?: number;
+  /** External platform id, when the gateway persisted one. */
+  message_id?: string;
+  platform_message_id?: string;
   role: "user" | "assistant" | "system" | "tool";
   content: string | null;
   tool_calls?: Array<{
@@ -2165,6 +2170,9 @@ export interface SessionMessage {
   tool_name?: string;
   tool_call_id?: string;
   timestamp?: number;
+  /** Presentation-only timeline marker, excluded from model context. */
+  display_kind?: string;
+  display_metadata?: Record<string, unknown>;
 }
 
 export interface SessionMessagesResponse {

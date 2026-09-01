@@ -1,9 +1,20 @@
 # GitHub Authentication Setup
 
-This skill sets up authentication so the agent can work with GitHub repositories, PRs, issues, and CI. It covers two paths:
+This skill sets up authentication so the agent can work with GitHub repositories, PRs, issues, and CI. It covers four paths:
 
-- **`git` (always available)** — uses HTTPS personal access tokens or SSH keys
+- **`app`** — GitHub App installation token (preferred for automated PR reviews; bot identity)
 - **`gh` CLI (if installed)** — richer GitHub API access with a simpler auth flow
+- **`git`** — HTTPS personal access tokens or SSH keys (manual operations, pushes)
+- **`curl`** — raw REST API calls using `$GITHUB_TOKEN`
+
+The detection order is set by `gh-env.sh`:
+
+1. If GitHub App credentials are configured (env vars `GITHUB_APP_ID` + `GITHUB_APP_INSTALLATION_ID` + `GITHUB_APP_PRIVATE_KEY_PATH`) → **App mode** (recommended for PR reviews; every action is attributed to `<app-name>[bot]`)
+2. Else if `gh auth status` shows authenticated → **gh** mode
+3. Else if `$GITHUB_TOKEN` / `~/.hermes/.env` / `~/.git-credentials` provides a token → **curl** mode
+4. Else → unauthenticated
+
+Set `HERMES_PR_REVIEW_USE_PERSONAL=1` to force fallback to your personal account even when App creds exist (useful for one-off manual reviews).
 
 ## Detection Flow
 
@@ -23,6 +34,85 @@ git config --global credential.helper 2>/dev/null || echo "no git credential hel
 1. If `gh auth status` shows authenticated → you're good, use `gh` for everything
 2. If `gh` is installed but not authenticated → use "gh auth" method below
 3. If `gh` is not installed → use "git-only" method below (no sudo needed)
+
+---
+
+## Method 0: GitHub App (Recommended for PR Reviews)
+
+A GitHub App gives Hermes its own bot identity — every review action is
+attributed to `<github-app-name>[bot]`, not your personal account. This
+is the same model used by Dependabot, Codecov, and most CI systems.
+
+### When to use App mode
+
+- You want PR reviews, comments, and approvals posted by a recognisable bot.
+- You don't want your personal account's avatar/identity associated with
+  automated actions (e.g. when the agent runs unattended via cron/webhook).
+- You want least-privilege credentials — an installation token is scoped
+  to the repositories you select, can be revoked instantly, and expires
+  in ~60 minutes.
+
+### Setup
+
+1. **Create the GitHub App**: go to *GitHub → Settings → Developer settings
+   → GitHub Apps → New GitHub App*. Name it e.g. `hermes-pr-review`.
+   Set:
+   - Homepage URL: any URL (your repo is fine)
+   - Webhook URL: leave blank (Hermes uses its own webhook receiver)
+   - **Repository permissions** (minimum):
+     - Metadata: Read-only
+     - Contents: Read-only
+     - Pull requests: **Read and write**
+   - Click **Create GitHub App**, then "Generate a new private key" —
+     save the downloaded `.pem` to `~/.hermes/secrets/hermes-pr-review.pem`
+     (`chmod 600`).
+2. **Install the App** on the repository (or repos) you want reviewed:
+   *GitHub App → Install App → Install on selected repositories*.
+3. **Find the installation ID**:
+   ```bash
+   curl -s -H "Authorization: token $YOUR_PERSONAL_PAT" \
+       https://api.github.com/app/installations \
+     | python3 -c "import sys,json
+   for i in json.load(sys.stdin):
+       print(f'{i[\"id\"]}: {i[\"account\"][\"login\"]} ({i[\"repository_selection\"]})')"
+   ```
+4. **Find the App ID**: on the GitHub App settings page (Public link →
+   "About" → App ID at the top right).
+5. **Configure Hermes** — add to `~/.hermes/.env`:
+   ```env
+   GITHUB_APP_ID=1234567
+   GITHUB_APP_INSTALLATION_ID=89012345
+   GITHUB_APP_PRIVATE_KEY_PATH=/root/.hermes/secrets/hermes-pr-review.pem
+   GITHUB_APP_NAME=hermes-pr-review   # optional, used in logs
+   ```
+6. **Verify**:
+   ```bash
+   source ~/.hermes/skills/github/github-auth/scripts/gh-env.sh
+   gh api user --jq '.login'
+   # Expected: "hermes-pr-review[bot]"
+   ```
+
+### What changes when App mode is active
+
+- Every `gh pr review`, `gh pr comment`, `gh api ...`, and raw `curl`
+  against `api.github.com` runs as the App bot.
+- Your personal `gh` OAuth session is **ignored** (because `GH_TOKEN` is
+  now set to the installation token).
+- Git `git push` / `git pull` for code changes still uses your personal
+  SSH key or PAT — those are independent.
+- The token is cached at `~/.hermes/.cache/github-app/installation-<id>.json`
+  (mode 0600) and auto-refreshes 5 minutes before expiry.
+
+To switch back to your personal account for one session:
+
+```bash
+export HERMES_PR_REVIEW_USE_PERSONAL=1
+source ~/.hermes/skills/github/github-auth/scripts/gh-env.sh
+gh api user --jq '.login'  # your personal username
+```
+
+See `references/github-app-quickstart.md` for the full step-by-step with
+screenshots, and `../github-app-auth/SKILL.md` for the adapter internals.
 
 ---
 

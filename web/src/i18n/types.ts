@@ -211,6 +211,15 @@ export interface Translations {
       system: string;
       tool: string;
     };
+    /** Memory write labels — surfaced on the in-transcript "+memory" marker
+     * rendered for every background self-improvement review that wrote
+     * something to memory/skills. The marker is the user's audit trail for
+     * what the agent learned mid-session. */
+    memoryStored: string;
+    memorySkillStored: string;
+    memoryStoredTitle: string;
+    memoryStoredDescription: string;
+    memoryActionsHeading: string;
   };
 
   // ── Analytics page ──
@@ -442,6 +451,8 @@ export interface Translations {
     actions?: string;
     manageSkills?: string;
     activeSetHint?: string;
+    chatAs?: string;
+    chatAsHint?: string;
   };
 
   // ── Skills page ──
@@ -695,6 +706,78 @@ export interface Translations {
       clipboard_unsupported: string;
       tweet_text: string;
     };
+  };
+
+  // ── Command palette (⌘K / Ctrl-K launcher) ──
+  palette: {
+    title: string;
+    placeholder: string;
+    searchAriaLabel: string;
+    resultsAriaLabel: string;
+    noResults: string;
+    startTyping: string;
+    currentPath: string;
+    shortcutNavigate: string;
+    shortcutSelect: string;
+    shortcutClose: string;
+    tipHotkey: string;
+    groupNavigation: string;
+    groupPlugins: string;
+    groupConfig: string;
+    groupCron: string;
+    groupSkills: string;
+    groupSessions: string;
+    groupActions: string;
+    actionOpenConfig: string;
+    actionOpenConfigSub: string;
+    actionOpenEnv: string;
+    actionOpenEnvSub: string;
+    actionOpenLogs: string;
+    actionOpenLogsSub: string;
+    actionOpenCron: string;
+    actionOpenCronSub: string;
+    actionOpenSkills: string;
+    actionOpenSkillsSub: string;
+    cronRun: string;
+    cronPause: string;
+    cronResume: string;
+    cronOpen: string;
+  };
+
+  // ── Config diff modal (review-before-save) ──
+  configDiff: {
+    title: string;
+    changeCount: string;
+    destructive: string;
+    safe: string;
+    destructiveHint: string;
+    noChanges: string;
+    nothingToSave: string;
+    typeLabel: string;
+    typeAriaLabel: string;
+    typeSaveToConfirm: string;
+    apply: string;
+    saveFailed: string;
+    confirmWord: string;
+  };
+
+  // ── Env diff modal (staged env-var edits) ──
+  envDiff: {
+    title: string;
+    pendingCount: string;
+    description: string;
+    typeLabel: string;
+    typeAriaLabel: string;
+    typeApplyToConfirm: string;
+    apply: string;
+    cancel: string;
+    discardAll: string;
+    pendingChanges: string;
+    setLabel: string;
+    clearLabel: string;
+    applyAllFailed: string;
+    confirmApply: string;
+    confirmApplyWord: string;
   };
 
   // ── Kanban ──

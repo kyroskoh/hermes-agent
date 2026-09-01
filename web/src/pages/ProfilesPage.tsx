@@ -13,6 +13,7 @@ import {
   Check,
   ChevronDown,
   Cpu,
+  MessageSquare,
   MoreVertical,
   Pencil,
   Package,
@@ -94,6 +95,7 @@ function ProfileActionsMenu({
   labels,
   settingActive,
   onCopyCommand,
+  onChatAs,
   onDelete,
   onEditDescription,
   onEditModel,
@@ -224,6 +226,17 @@ function ProfileActionsMenu({
             {labels.openInTerminal}
           </button>
 
+          <button
+            type="button"
+            role="menuitem"
+            className={itemClass}
+            title={labels.chatAsHint}
+            onClick={run(onChatAs)}
+          >
+            <MessageSquare className="h-4 w-4" />
+            {labels.chatAs}
+          </button>
+
           {!isDefault && (
             <button
               type="button"
@@ -309,6 +322,10 @@ export default function ProfilesPage() {
       activeSetHint:
         p.activeSetHint ??
         "Dashboard switched to manage {name}. New CLI/gateway runs will use this profile too.",
+      chatAs: p.chatAs ?? "Chat as this profile",
+      chatAsHint:
+        p.chatAsHint ??
+        "Open dashboard chat scoped to {name} (uses that profile's SOUL.md and memory)",
     };
   }, [t.profiles]);
 
@@ -511,6 +528,15 @@ export default function ProfilesPage() {
     } finally {
       setSettingActive(null);
     }
+  };
+
+  // Open the dashboard chat scoped to a specific profile. Uses the same
+  // ?profile= mechanism every other management surface uses; ProfileProvider
+  // re-asserts it on subsequent navigations so the scope survives chat
+  // sidebar nav clicks.
+  const handleChatAs = (name: string) => {
+    setProfile(name);
+    navigate(`/chat?profile=${encodeURIComponent(name)}`);
   };
 
   // Closes whichever editor dialog is open (model / description / SOUL).
@@ -1133,6 +1159,9 @@ export default function ProfilesPage() {
                           settingActive={settingActive === p.name}
                           labels={{
                             actions: L.actions,
+                            chatAs: L.chatAs,
+                            chatAsHint: L.chatAsHint
+                              .replace("{name}", p.name),
                             setActive: L.setActive,
                             editModel: L.editModel,
                             editDescription: L.editDescription,
@@ -1145,6 +1174,7 @@ export default function ProfilesPage() {
                           onCopyCommand={() =>
                             handleCopyTerminalCommand(p.name)
                           }
+                          onChatAs={() => handleChatAs(p.name)}
                           onDelete={() => profileDelete.requestDelete(p.name)}
                           onEditDescription={() => openDescEditor(p)}
                           onEditModel={() => openModelEditor(p)}
@@ -1404,6 +1434,8 @@ interface ProfileActionsMenuProps {
   isEditingSoul: boolean;
   labels: {
     actions: string;
+    chatAs: string;
+    chatAsHint: string;
     delete: string;
     editDescription: string;
     editModel: string;
@@ -1415,6 +1447,7 @@ interface ProfileActionsMenuProps {
   };
   settingActive: boolean;
   onCopyCommand: () => void;
+  onChatAs: () => void;
   onDelete: () => void;
   onEditDescription: () => void;
   onEditModel: () => void;

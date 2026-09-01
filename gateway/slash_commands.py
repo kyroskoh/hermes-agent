@@ -123,6 +123,62 @@ def _home_thread_from_source(source) -> Optional[str]:
     return str(thread_id)
 
 
+def normalize_profile_for_profile(value: str) -> Optional[str]:
+    """Normalise a profile name the way ``/p <name>`` expects it.
+
+    Returns the lowercase canonical name when *value* names a profile
+    that exists on disk; ``None`` for unknown / malformed input. Empty
+    string is rejected so the listing branch stays unambiguous.
+    """
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        from hermes_cli.profiles import normalize_profile_name, validate_profile_name
+
+        name = normalize_profile_name(raw)
+        validate_profile_name(name)
+    except (ValueError, ImportError):
+        return None
+    try:
+        from hermes_cli.profiles import profile_exists
+
+        if not profile_exists(name):
+            return None
+    except ImportError:
+        return None
+    return name
+
+
+def _profile_short_preview(name: str) -> str:
+    """Return a one-line description of a profile for the /personality list.
+
+    Falls back to the literal ``"(profile <name>)"`` when a SOUL.md
+    summary cannot be derived. We deliberately do not read the entire
+    SOUL.md — large persona files make the listing unreadable.
+    """
+    from hermes_constants import get_hermes_home
+
+    base = Path(get_hermes_home())
+    soul = base / "profiles" / name / "SOUL.md"
+    if not soul.exists():
+        return f"(profile {name})"
+    try:
+        text = soul.read_text(encoding="utf-8").strip()
+    except Exception:  # pragma: no cover - read failure path
+        return f"(profile {name})"
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if len(line) > 80:
+            return line[:77] + "..."
+        return line
+    return f"(profile {name})"
+
+
 class GatewaySlashCommandsMixin:
     """In-session slash-command handlers for GatewayRunner."""
 
@@ -2595,35 +2651,108 @@ class GatewaySlashCommandsMixin:
         return f"{prefix} {result.message}"
 
     async def _handle_personality_command(self, event: MessageEvent) -> str:
-        """Handle /personality command - list or set a personality.
+        """Handle /personality command - list or set the active profile.
 
-        All resolution/persistence goes through hermes_cli.personality —
-        the single owner of personality state on every surface.
+        On the gateway, ``/personality <name>`` sets the **active profile**
+        for ``(platform, chat_id)``, not a persona overlay. The profile
+        determines which ``SOUL.md`` mounts at the Hermes home for this
+        chat — Kyros's ``/p wilnice`` swaps the chat onto the wilnice
+        profile (boyfriend voice); Wilnice's ``/p wilnice`` is denied
+        because her policy only allows ``kyros``; strangers can only
+        ``/p default``.
+
+        Per-sender active profile state lives in
+        ``gateway/sender_profile_state.py``. The single-user CLI/TUI path
+        still uses the global ``display.personality`` so single-user
+        surfaces keep their existing behaviour.
         """
         from gateway.run import _load_gateway_config
-        from hermes_cli.personality import (
-            active_personality_name,
-            available_personalities,
-            describe_personality,
-            persist_personality,
-            prompt_text,
-            resolve_personality,
+        from gateway.sender_profile_state import (
+            get_active_profile as get_sender_profile,
+            set_active_profile as set_sender_profile,
+            clear_active_profile as clear_sender_profile,
         )
+        from gateway.user_profile_policy import resolve_policy_for_source
 
         args = event.get_command_args().strip()
+        source = getattr(event, "source", None)
 
         try:
             config = _load_gateway_config()
         except Exception:
             config = {}
-        personalities = available_personalities(config)
+
+        policy_lookup = (
+            resolve_policy_for_source(source) if source is not None else None
+        )
+        allowed_profiles = (
+            policy_lookup.policy.allowed_profiles
+            if policy_lookup is not None
+            else frozenset()
+        )
+        forced_profile = (
+            policy_lookup.policy.forced_profile
+            if policy_lookup is not None
+            else None
+        )
+        is_gateway_source = source is not None and policy_lookup is not None
 
         if not args:
+            if is_gateway_source and policy_lookup is not None:
+                current = get_sender_profile(
+                    getattr(source, "platform", None),
+                    getattr(source, "chat_id", None),
+                ) or policy_lookup.policy.default_profile
+                lines = [t("gateway.profile.active", profile=current)]
+                lines.append(t("gateway.personality.header"))
+                show_none = (
+                    forced_profile is None or "default" in allowed_profiles
+                )
+                if show_none:
+                    marker = " ✓" if current == "default" else ""
+                    lines.append(
+                        t(
+                            "gateway.personality.item",
+                            name=f"default{marker}",
+                            preview=t("gateway.personality.none_preview"),
+                        )
+                    )
+                for name in sorted(allowed_profiles):
+                    if name == "default":
+                        continue
+                    marker = " ✓" if name == current else ""
+                    lines.append(
+                        t(
+                            "gateway.personality.item",
+                            name=f"{name}{marker}",
+                            preview=_profile_short_preview(name),
+                        )
+                    )
+                lines.append(t("gateway.personality.usage"))
+                return "\n".join(lines)
+
+            # CLI/TUI surface: fall back to legacy /personality listing.
+            from hermes_cli.personality import (
+                active_personality_name,
+                available_personalities,
+                describe_personality,
+                normalize_personality_name,
+                resolve_personality,
+            )
+            personalities = available_personalities(config)
             current = active_personality_name(config)
+            current_norm = normalize_personality_name(current or "")
             lines = [t("gateway.personality.header")]
-            lines.append(t("gateway.personality.none_option"))
+            marker = " ✓" if not current_norm else ""
+            lines.append(
+                t(
+                    "gateway.personality.item",
+                    name=f"none{marker}",
+                    preview=t("gateway.personality.none_preview"),
+                )
+            )
             for name, prompt in personalities.items():
-                marker = " ✓" if name == current else ""
+                marker = " ✓" if name == current_norm else ""
                 lines.append(
                     t(
                         "gateway.personality.item",
@@ -2634,24 +2763,76 @@ class GatewaySlashCommandsMixin:
             lines.append(t("gateway.personality.usage"))
             return "\n".join(lines)
 
+        # Validate the requested profile against the on-disk registry so
+        # a typo like ``/p wiilnice`` gets a clean error.
+        requested = normalize_profile_for_profile(args)
+        if not requested:
+            available = ", ".join(
+                f"`{n}`" for n in sorted(allowed_profiles)
+            ) or "`default`"
+            return t(
+                "gateway.personality.unknown", name=args.lower(), available=available
+            )
+
+        if is_gateway_source and policy_lookup is not None and not policy_lookup.policy.can_switch_to(requested):
+            if forced_profile:
+                reply = (
+                    f"{t('gateway.personality.not_available_for_chat')}\n"
+                    f"{t('gateway.personality.forced_active', profile=forced_profile)}"
+                )
+            else:
+                allowed_list = ", ".join(
+                    f"`{n}`" for n in sorted(allowed_profiles)
+                ) or "`default`"
+                reply = (
+                    f"{t('gateway.personality.not_available_for_chat')}\n"
+                    f"Allowed personalities: {allowed_list}"
+                )
+            return reply
+
+        if is_gateway_source:
+            if requested == "default":
+                wrote = clear_sender_profile(
+                    getattr(source, "platform", None),
+                    getattr(source, "chat_id", None),
+                )
+            else:
+                wrote = set_sender_profile(
+                    getattr(source, "platform", None),
+                    getattr(source, "chat_id", None),
+                    getattr(source, "user_id", None),
+                    requested,
+                )
+            if not wrote:
+                return t(
+                    "gateway.personality.save_failed",
+                    error="sender-profile write failed",
+                )
+            return t("gateway.personality.set_to", name=requested)
+
+        # CLI/TUI fallback: legacy behaviour preserved.
+        from hermes_cli.personality import (
+            normalize_personality_name,
+            persist_personality,
+            prompt_text,
+            resolve_personality,
+        )
         try:
             name, new_prompt = resolve_personality(args, config)
         except ValueError:
-            available = "`none`, " + ", ".join(f"`{n}`" for n in personalities)
-            return t("gateway.personality.unknown", name=args.lower(), available=available)
-
-        # Persist the selection only — hermes_cli.personality never writes
-        # agent.system_prompt (user-owned manual overlay).
+            available = "`none`, " + ", ".join(
+                f"`{n}`" for n in available_personalities(config)
+            )
+            return t(
+                "gateway.personality.unknown", name=args.lower(), available=available
+            )
         if not persist_personality(name):
             return t("gateway.personality.save_failed", error="config write failed")
-
         if not name:
             self._ephemeral_system_prompt = prompt_text(
                 cfg_get(config, "agent", "system_prompt", default="")
             )
             return t("gateway.personality.cleared")
-
-        # Update in-memory so it takes effect on the very next message.
         self._ephemeral_system_prompt = new_prompt
         return t("gateway.personality.set_to", name=name)
 

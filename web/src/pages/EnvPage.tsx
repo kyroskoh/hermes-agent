@@ -14,6 +14,7 @@ import {
   Zap,
   ChevronDown,
   ChevronRight,
+  ListChecks,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { EnvVarInfo } from "@/lib/api";
@@ -39,6 +40,11 @@ import { Label } from "@nous-research/ui/ui/components/label";
 import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
+import {
+  EnvDiffModal,
+  type EnvEdit,
+  type EnvDiffApplyResult,
+} from "@/components/EnvDiffModal";
 
 /* ------------------------------------------------------------------ */
 /*  Provider grouping                                                  */
@@ -611,8 +617,18 @@ export default function EnvPage() {
   const [vars, setVars] = useState<Record<string, EnvVarInfo> | null>(null);
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [revealed, setRevealed] = useState<Record<string, string>>({});
-  const [saving, setSaving] = useState<string | null>(null);
+  const [saving] = useState<string | null>(null); // legacy prop — saves route through the diff modal now
   const [showAdvanced, setShowAdvanced] = useState(true); // Show all providers by default
+  // Pending clear operations (set via the existing DeleteConfirmDialog).
+  // These join the staged batch for the diff review modal.
+  const [pendingClears, setPendingClears] = useState<Set<string>>(new Set());
+  // Snapshot of the env state at the moment an edit was staged — used to
+  // build the "before" view in the diff modal without round-tripping.
+  const [stagedBefore, setStagedBefore] = useState<Record<
+    string,
+    EnvVarInfo
+  > | null>(null);
+  const [diffOpen, setDiffOpen] = useState(false);
   const { toast, showToast } = useToast();
   const { t } = useI18n();
   const { setAfterTitle } = usePageHeader();
@@ -681,68 +697,120 @@ export default function EnvPage() {
     };
   }, [vars, sections, setAfterTitle]);
 
-  const handleSave = async (key: string) => {
+  /* ---- Staged batch: build EnvEdit list for the diff modal ---- */
+  const stagedEdits = useMemo<EnvEdit[]>(() => {
+    if (!vars) return [];
+    const list: EnvEdit[] = [];
+    // Set operations (existing edits map)
+    for (const [key, value] of Object.entries(edits)) {
+      const info = vars[key];
+      list.push({
+        key,
+        clearing: false,
+        redactedBefore: info?.redacted_value ?? null,
+        wasSet: !!info?.is_set,
+        pendingValue: value,
+      });
+    }
+    // Clear operations
+    for (const key of pendingClears) {
+      const info = vars[key];
+      // Skip if there's also a pending set — set wins (the edit takes
+      // precedence over the clear).
+      if (edits[key] !== undefined) continue;
+      list.push({
+        key,
+        clearing: true,
+        redactedBefore: info?.redacted_value ?? null,
+        wasSet: !!info?.is_set,
+        pendingValue: null,
+      });
+    }
+    return list;
+  }, [vars, edits, pendingClears]);
+
+  const hasStagedEdits = stagedEdits.length > 0;
+
+  /* ---- Diff modal application handler ---- */
+  const handleDiffApplied = useCallback(
+    (result: EnvDiffApplyResult) => {
+      // For both success and partial-failure cases, we have to reconcile
+      // the local state to match what the server actually wrote.  The
+      // modal handled the API calls itself; we update the cached var info
+      // and clear the staging area for everything that succeeded.
+      if (result.error) {
+        // Partial failure — only drop edits up to the first failure.
+        // The modal's apply loop stops on first error, so we need to
+        // replay: succeeded edits succeeded, edits[0..succeeded-1] are
+        // done.  The rest stay staged.
+        // Simpler approach: re-fetch all vars from the server.
+        api
+          .getEnvVars()
+          .then((fresh) => {
+            setVars(fresh);
+            setStagedBefore(fresh);
+          })
+          .catch(() => {});
+      } else {
+        // All succeeded — refresh from server to pick up redacted_value
+        // updates and clear the staging area.
+        api
+          .getEnvVars()
+          .then((fresh) => {
+            setVars(fresh);
+            setStagedBefore(fresh);
+          })
+          .catch(() => {});
+      }
+      // Clear the staging area.  Even on partial failure, the user will
+      // need to re-stage anything that didn't apply — they'll see it in
+      // the banner count.
+      setEdits({});
+      setRevealed({});
+      setPendingClears(new Set());
+      setDiffOpen(false);
+    },
+    [],
+  );
+
+  /* ---- Single-set path: still fires per-row, but routes through the
+          modal if there's already other staged work in flight. ---- */
+  const handleSave = (key: string) => {
     const value = edits[key];
     if (!value) return;
-    setSaving(key);
-    try {
-      await api.setEnvVar(key, value);
-      setVars((prev) =>
-        prev
-          ? {
-              ...prev,
-              [key]: {
-                ...prev[key],
-                is_set: true,
-                redacted_value: value.slice(0, 4) + "..." + value.slice(-4),
-              },
-            }
-          : prev,
-      );
-      setEdits((prev) => {
-        const n = { ...prev };
-        delete n[key];
-        return n;
-      });
-      setRevealed((prev) => {
-        const n = { ...prev };
-        delete n[key];
-        return n;
-      });
-      showToast(`${key} ${t.common.save.toLowerCase()}d`, "success");
-    } catch (e) {
-      showToast(`${t.config.failedToSave} ${key}: ${e}`, "error");
-    } finally {
-      setSaving(null);
+    if (hasStagedEdits) {
+      // Already a batch in progress — just open the modal.
+      setDiffOpen(true);
+      return;
     }
+    if (!stagedBefore) {
+      // First staged edit — snapshot the current state for the diff view.
+      setStagedBefore(vars);
+    }
+    // Capture the per-row immediate-save path as a single-row modal so the
+    // user always sees what they're about to write.  This satisfies the
+    // "review before destructive write" intent of the spec — even single
+    // sets deserve a glance.
+    setDiffOpen(true);
   };
 
+  /* ---- Clear path: stage instead of immediate-delete.  The existing
+          DeleteConfirmDialog still gates the action; on confirm we add
+          to pendingClears and open the modal. ---- */
   const keyClear = useConfirmDelete({
     onDelete: useCallback(
       async (key: string) => {
-        setSaving(key);
-        try {
-          await api.deleteEnvVar(key);
-          setVars((prev) => removeDeletedEnvVarFromState(prev, key));
-          setEdits((prev) => {
-            const n = { ...prev };
-            delete n[key];
-            return n;
-          });
-          setRevealed((prev) => {
-            const n = { ...prev };
-            delete n[key];
-            return n;
-          });
-          showToast(`${key} ${t.common.removed}`, "success");
-        } catch (e) {
-          showToast(`${t.common.failedToRemove} ${key}: ${e}`, "error");
-          throw e;
-        } finally {
-          setSaving(null);
+        if (!stagedBefore) {
+          setStagedBefore(vars);
         }
+        setPendingClears((prev) => {
+          const n = new Set(prev);
+          n.add(key);
+          return n;
+        });
+        setDiffOpen(true);
       },
-      [showToast, t.common.removed, t.common.failedToRemove],
+      [vars, stagedBefore],
     ),
   });
 
@@ -998,6 +1066,72 @@ export default function EnvPage() {
         onCancelEdit={cancelEdit}
         onAddKey={handleAddKey}
         clearDialogOpen={keyClear.isOpen}
+      />
+      {/* Staged-changes banner + diff modal */}
+      {hasStagedEdits && (
+        <div
+          role="status"
+          className="sticky bottom-4 z-30 flex items-center justify-between gap-3 px-4 py-3 border border-primary/40 bg-primary/10 shadow-lg"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <ListChecks className="h-4 w-4 text-primary shrink-0" />
+            <span className="text-sm font-medium">
+              {stagedEdits.length} pending{" "}
+              {stagedEdits.length === 1 ? "change" : "changes"}
+            </span>
+            <span className="text-xs text-text-tertiary truncate hidden sm:inline">
+              ({Object.keys(edits).filter((k) => edits[k] !== undefined).length} set,{" "}
+              {pendingClears.size} clear)
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              ghost
+              destructive
+              size="sm"
+              onClick={() => {
+                if (window.confirm("Discard all staged env-var edits?")) {
+                  setEdits({});
+                  setRevealed({});
+                  setPendingClears(new Set());
+                  setDiffOpen(false);
+                }
+              }}
+            >
+              Discard all
+            </Button>
+            <Button size="sm" onClick={() => setDiffOpen(true)}>
+              Review &amp; apply
+            </Button>
+          </div>
+        </div>
+      )}
+      <EnvDiffModal
+        edits={diffOpen ? stagedEdits : []}
+        onCancel={() => setDiffOpen(false)}
+        onDiscard={(key) => {
+          // Drop one staged entry — either a set or a clear.
+          if (pendingClears.has(key)) {
+            setPendingClears((prev) => {
+              const n = new Set(prev);
+              n.delete(key);
+              return n;
+            });
+          } else {
+            setEdits((prev) => {
+              const n = { ...prev };
+              delete n[key];
+              return n;
+            });
+          }
+        }}
+        onDiscardAll={() => {
+          setEdits({});
+          setRevealed({});
+          setPendingClears(new Set());
+          setDiffOpen(false);
+        }}
+        onApplied={(result) => handleDiffApplied(result)}
       />
       <PluginSlot name="env:bottom" />
     </div>

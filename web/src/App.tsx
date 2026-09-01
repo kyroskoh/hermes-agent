@@ -104,6 +104,7 @@ import { PluginPage, PluginSlot, usePlugins } from "@/plugins";
 import type { PluginManifest } from "@/plugins";
 import { useTheme } from "@/themes";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
+import { CommandPalette } from "@/components/CommandPalette";
 import { latchChatActivation } from "@/lib/chat-activation";
 import { api } from "@/lib/api";
 import type { StatusResponse, UpdateCheckResponse } from "@/lib/api";
@@ -857,6 +858,7 @@ export default function App() {
       </div>
 
       <PluginSlot name="overlay" />
+      <CommandPalette manifests={manifests} />
     </div>
     </ProfileProvider>
   );

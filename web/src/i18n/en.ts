@@ -198,6 +198,16 @@ export const en: Translations = {
       system: "System",
       tool: "Tool",
     },
+    /** "+memory" marker labels rendered on the timeline when the background
+     * self-improvement review writes something the user said. These turn a
+     * faded yellow bubble into a clear, badge-headed audit row showing the
+     * exact datetime and the sentences the agent learned. */
+    memoryStored: "+memory",
+    memorySkillStored: "+skill",
+    memoryStoredTitle: "Memory stored from this turn",
+    memoryStoredDescription:
+      "The background review wrote this to memory after reading your messages. Anything in this row will be recalled in future sessions.",
+    memoryActionsHeading: "What was stored",
   },
 
   analytics: {
@@ -684,6 +694,77 @@ export const en: Translations = {
         "Clipboard image copy not supported in this browser — use Download instead.",
       tweet_text: "Just unlocked {tier_part}\"{name}\" in Hermes Agent ☤",
     },
+  },
+
+  palette: {
+    title: "Command palette",
+    placeholder: "Type a command, search pages, keys, cron…",
+    searchAriaLabel: "Search palette",
+    resultsAriaLabel: "Palette results",
+    noResults: "No matches",
+    startTyping: "Start typing to search…",
+    currentPath: "Current",
+    shortcutNavigate: "navigate",
+    shortcutSelect: "select",
+    shortcutClose: "close",
+    tipHotkey: "Hotkey",
+    groupNavigation: "Navigation",
+    groupPlugins: "Plugins",
+    groupConfig: "Config keys",
+    groupCron: "Cron jobs",
+    groupSkills: "Skills",
+    groupSessions: "Recent sessions",
+    groupActions: "Quick actions",
+    actionOpenConfig: "Open config",
+    actionOpenConfigSub: "Edit config.yaml",
+    actionOpenEnv: "Open env vars",
+    actionOpenEnvSub: "Manage API keys & env",
+    actionOpenLogs: "Open logs",
+    actionOpenLogsSub: "Tail service logs",
+    actionOpenCron: "Open cron",
+    actionOpenCronSub: "Manage scheduled jobs",
+    actionOpenSkills: "Open skills",
+    actionOpenSkillsSub: "Browse installed skills",
+    cronRun: "Run now",
+    cronPause: "Pause",
+    cronResume: "Resume",
+    cronOpen: "Open in cron page",
+  },
+
+  configDiff: {
+    title: "Review config changes",
+    changeCount: "{n} change{s}",
+    destructive: "Destructive",
+    safe: "Safe",
+    destructiveHint:
+      "This change touches security or terminal settings. Make sure you have a session open to revert it if something goes wrong.",
+    noChanges: "No changes",
+    nothingToSave: "Nothing to save — no changes detected.",
+    typeLabel: "Type SAVE to confirm",
+    typeAriaLabel: "Type SAVE to confirm",
+    typeSaveToConfirm: "Type SAVE to confirm",
+    apply: "Apply changes",
+    saveFailed: "Save failed",
+    confirmWord: "SAVE",
+  },
+
+  envDiff: {
+    title: "Review env-var changes",
+    pendingCount: "{n} pending change{s}",
+    description:
+      "These env-var edits are staged and will be written to ~/.hermes/.env when you apply.",
+    typeLabel: "Type APPLY to confirm",
+    typeAriaLabel: "Type APPLY to confirm",
+    typeApplyToConfirm: "Type APPLY to confirm",
+    apply: "Apply all",
+    cancel: "Cancel",
+    discardAll: "Discard all",
+    pendingChanges: "Pending changes",
+    setLabel: "Set",
+    clearLabel: "Clear",
+    applyAllFailed: "One or more env-var writes failed",
+    confirmApply: "Apply",
+    confirmApplyWord: "APPLY",
   },
 
   kanban: {

@@ -37,11 +37,13 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
 try:
@@ -1344,6 +1346,88 @@ class WebhookAdapter(BasePlatformAdapter):
             deliver_type, content, delivery
         )
 
+    def _build_gh_subprocess_env(self, repo: str) -> dict[str, str]:
+        """Return a clean env dict for invoking ``gh`` as a subprocess.
+
+        If GitHub App credentials are present in ``os.environ``
+        (``GITHUB_APP_ID`` + ``GITHUB_APP_INSTALLATION_ID`` +
+        ``GITHUB_APP_PRIVATE_KEY_PATH``), mint a short-lived installation
+        token via the ``github-app-auth`` adapter and inject it into
+        ``GH_TOKEN`` / ``GITHUB_TOKEN``. The comment will then be posted
+        as ``<github-app-name>[bot]`` instead of whatever OAuth identity
+        ``gh`` happens to have stored on disk.
+
+        If App creds are not present, fall back to the gateway's own env
+        (which carries the personal PAT, if any). The caller can override
+        by setting ``HERMES_PR_REVIEW_USE_PERSONAL=1``.
+        """
+        env = os.environ.copy()
+
+        # Honour explicit personal-account override.
+        if env.get("HERMES_PR_REVIEW_USE_PERSONAL", "").strip() == "1":
+            logger.debug("[webhook] HERMES_PR_REVIEW_USE_PERSONAL=1 — using personal token")
+            return env
+
+        # App mode requires three vars at minimum.
+        if not (
+            env.get("GITHUB_APP_ID", "").strip()
+            and env.get("GITHUB_APP_INSTALLATION_ID", "").strip()
+            and (
+                env.get("GITHUB_APP_PRIVATE_KEY_PATH", "").strip()
+                or env.get("GITHUB_APP_PRIVATE_KEY", "").strip()
+            )
+        ):
+            return env
+
+        # Locate the token script — check user HERMES_HOME first, then
+        # the bundled install path (for when running in a profile that
+        # doesn't have the skill seeded yet).
+        hermes_home = env.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+        token_script = Path(hermes_home) / "skills" / "github" / "github-app-auth" / "scripts" / "github-app-token.py"
+        if not token_script.exists():
+            token_script = (
+                Path(__file__).resolve().parents[2]  # gateway/platforms/webhook.py → gateway
+                / "skills" / "github" / "github-app-auth" / "scripts" / "github-app-token.py"
+            )
+        if not token_script.exists():
+            logger.warning(
+                "[webhook] GitHub App configured but token script not found at %s — "
+                "comment will be posted with the gateway's default token",
+                token_script,
+            )
+            return env
+
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(token_script), "--repo", repo],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            logger.error("[webhook] failed to mint GitHub App installation token: %s", exc)
+            return env
+
+        if proc.returncode != 0 or not proc.stdout.strip():
+            logger.error(
+                "[webhook] GitHub App token mint failed (rc=%s): %s",
+                proc.returncode,
+                proc.stderr.strip()[:300],
+            )
+            return env
+
+        token = proc.stdout.strip()
+        # gh reads either GH_TOKEN or GITHUB_TOKEN — set both so callers
+        # downstream that read either var also see the App identity.
+        env["GH_TOKEN"] = token
+        env["GITHUB_TOKEN"] = token
+        logger.info(
+            "[webhook] GitHub App token minted for %s — comment will post as %s[bot]",
+            repo,
+            env.get("GITHUB_APP_NAME", "app"),
+        )
+        return env
+
     async def _deliver_github_comment(
         self, content: str, delivery: dict
     ) -> SendResult:
@@ -1381,6 +1465,13 @@ class WebhookAdapter(BasePlatformAdapter):
                 success=False, error="Invalid repo format"
             )
 
+        # Build a clean env for the gh subprocess. If a GitHub App is
+        # configured (GITHUB_APP_ID + INSTALLATION_ID + private key), mint
+        # an installation access token via the github-app-auth adapter so
+        # the comment is attributed to <app-name>[bot] instead of the
+        # gateway's stored gh OAuth login. Otherwise inherit the gateway
+        # env (which carries the personal token, if any).
+        gh_env = self._build_gh_subprocess_env(repo)
         try:
             # Off-loop: `gh` does network I/O and can take its full 30s
             # timeout. Running it inline froze every adapter and timer on
@@ -1403,6 +1494,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 capture_output=True,
                 text=True, encoding='utf-8', errors='replace',
                 timeout=30,
+                env=gh_env,
             )
             if result.returncode == 0:
                 logger.info(

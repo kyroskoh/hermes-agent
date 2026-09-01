@@ -30131,6 +30131,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Resolve which profile's HERMES_HOME should serve this inbound source.
 
         Resolution order:
+          0. **Per-sender active profile** — the profile that this specific
+             ``(platform, chat_id)`` previously persisted via ``/p <name>``,
+             gated by the user-policy ``users.<canonical>.allowed_profiles``.
+             When Wilnice (forced profile ``kyros``) and Kyros (free to
+             switch) send from different IDs concurrently, each lands in
+             its own profile directory with no cross-talk.
           1. ``source.profile`` — set by /p/<profile>/ URL prefix, per-credential
              adapter ownership, OR profile_routes matching at ``build_source`` time.
           2. ``_profile_name_for_source`` — re-run routing here as a defensive
@@ -30138,13 +30144,57 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
           3. The active profile (the multiplexer's own home).
         """
         from gateway.profile_routing import ProfileRouteRejected
+        from gateway.sender_profile_state import get_active_profile
+        from gateway.user_profile_policy import resolve_policy_for_source
         from hermes_cli.profiles import (
             get_active_profile_name,
             get_profile_dir,
             profile_exists,
         )
         from hermes_constants import get_hermes_home
-        
+
+        # Per-sender active profile lookup. Goes BEFORE the existing
+        # resolution order so a chat that explicitly chose ``/p wilnice``
+        # stays on wilnice even if the configured profile_routes would
+        # otherwise route the same chat to a different profile.
+        try:
+            sender_profile = get_active_profile(
+                getattr(source.platform, "value", source.platform),
+                source.chat_id,
+            )
+        except Exception:
+            sender_profile = None
+
+        if sender_profile:
+            try:
+                policy_lookup = resolve_policy_for_source(source)
+                policy = policy_lookup.policy
+                # Honor the policy: a forced_profile user gets pinned back
+                # to the forced profile if they try to escalate via the
+                # sidecar.
+                effective = policy.forced_profile or sender_profile
+                if policy.forced_profile and sender_profile != policy.forced_profile:
+                    logger.info(
+                        "Sender policy forced_profile override: chat %s/%s tried profile %r; using %r",
+                        getattr(source.platform, "value", source.platform),
+                        source.chat_id,
+                        sender_profile,
+                        policy.forced_profile,
+                    )
+                if profile_exists(effective):
+                    return get_profile_dir(effective)
+                logger.warning(
+                    "Persisted sender profile %r does not exist; falling back.",
+                    effective,
+                )
+            except Exception:
+                logger.warning(
+                    "Per-sender profile lookup failed for %s/%s; ignoring.",
+                    getattr(source.platform, "value", source.platform),
+                    source.chat_id,
+                    exc_info=True,
+                )
+
         # Track whether a profile was explicitly requested (vs. falling back to default)
         explicit_profile = None
         try:
@@ -30157,7 +30207,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     explicit_profile = name  # Routing explicitly set this profile
             if not name:
                 name = get_active_profile_name() or "default"
-            
+
             profile_dir = get_profile_dir(name)
             # Warn if an explicit profile doesn't exist on disk
             if explicit_profile and not profile_exists(name):

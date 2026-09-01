@@ -204,15 +204,19 @@ gateway:
     none_configured:       "No personalities configured in `{path}/config.yaml`"
     header:                "🎭 **Available Personalities**\n"
     none_option:           "• `none` — (no personality overlay)"
+    none_preview:          "(no personality overlay)"
     item:                  "• `{name}` — {preview}"
     usage:                 "\nUsage: `/personality <name>`"
     save_failed:           "⚠️ Failed to save personality change: {error}"
     cleared:               "🎭 Personality cleared — using base agent behavior.\n_(takes effect on next message)_"
     set_to:                "🎭 Personality set to **{name}**\n_(takes effect on next message)_"
     unknown:               "Unknown personality: `{name}`\n\nAvailable: {available}"
+    not_available_for_chat: "This personality isn't available for this chat."
+    forced_active:         "Active profile: `{profile}`"
 
   profile:
     header:                "👤 **Profile:** `{profile}`"
+    active:                "👤 **Active profile:** `{profile}`"
     home:                  "📂 **Home:** `{home}`"
 
   reasoning:
