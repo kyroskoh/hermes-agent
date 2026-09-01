@@ -953,9 +953,16 @@ def _make_callback_waiter(
         dashboard_flow = get_dashboard_oauth_flow()
         if dashboard_flow is not None:
             # The dashboard flow still speaks the legacy tuple; normalize it
-            # here so both callback sources hand the SDK one shape.
-            dash_code, dash_state = await dashboard_flow.wait_for_callback()
-            return _authorization_code_result(dash_code, dash_state)
+            # here so both callback sources hand the SDK one shape. The
+            # ``iss`` form is required for any authorization server that
+            # advertised ``authorization_response_iss_parameter_supported``
+            # (RFC 9207) — Cloudflare, Atlassian, Notion, GitHub MCP, etc.
+            # Without it the SDK raises
+            # ``Authorization response missing iss parameter advertised by
+            # the authorization server`` and the flow never reaches token
+            # exchange.
+            dash_code, dash_state, dash_iss = await dashboard_flow.wait_for_callback_full()
+            return _authorization_code_result(dash_code, dash_state, dash_iss)
 
         # Reject before binding the callback listener in non-interactive
         # contexts. Reaching here means the SDK entered the authorization-code

@@ -33,6 +33,13 @@ class DashboardOAuthFlow:
     tools: list[dict] = field(default_factory=list)
     expected_state: str | None = field(default=None, init=False)
     _callback: tuple[str, str | None] | None = field(default=None, init=False, repr=False)
+    # RFC 9207: authorization-response issuer. Modern MCP servers (Cloudflare,
+    # Atlassian, Notion, GitHub MCP, ...) advertise
+    # ``authorization_response_iss_parameter_supported: true`` and the SDK
+    # raises ``Authorization response missing iss parameter advertised by the
+    # authorization server`` when this is absent. The loopback callback
+    # already extracts ``iss``; the dashboard-relay path had been dropping it.
+    _callback_iss: str | None = field(default=None, init=False, repr=False)
     _callback_error: str | None = field(default=None, init=False, repr=False)
     _authorization_ready: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _callback_ready: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
@@ -65,6 +72,7 @@ class DashboardOAuthFlow:
         code: str | None,
         state: str | None,
         error: str | None,
+        iss: str | None = None,
     ) -> None:
         with self._lock:
             if self._callback_ready.is_set():
@@ -79,11 +87,29 @@ class DashboardOAuthFlow:
                 self._callback_error = error
             elif code:
                 self._callback = (code, state)
+                self._callback_iss = iss
             else:
                 self._callback_error = "OAuth callback did not include code or error"
             self._callback_ready.set()
 
     async def wait_for_callback(self, timeout: float = 300.0) -> tuple[str, str | None]:
+        """Return ``(code, state)`` — legacy shape kept for backwards
+        compatibility with callers that haven't been updated to consume
+        ``iss``. New code should use :meth:`wait_for_callback_full`.
+        """
+        code, state, _iss = await self.wait_for_callback_full(timeout=timeout)
+        return code, state
+
+    async def wait_for_callback_full(
+        self, timeout: float = 300.0
+    ) -> tuple[str, str | None, str | None]:
+        """Return ``(code, state, iss)`` for the OAuth callback.
+
+        ``iss`` is the RFC 9207 authorization-response issuer the
+        authorization server appended to its redirect. It is required by
+        the MCP SDK's validator when the server advertised support, and
+        previously got dropped on the dashboard-relay path.
+        """
         ready = await asyncio.to_thread(self._callback_ready.wait, timeout)
         if not ready:
             raise TimeoutError("Timed out waiting for MCP OAuth callback")
@@ -91,7 +117,8 @@ class DashboardOAuthFlow:
             raise RuntimeError(f"OAuth authorization failed: {self._callback_error}")
         if self._callback is None:
             raise RuntimeError("OAuth callback did not include an authorization code")
-        return self._callback
+        code, state = self._callback
+        return code, state, self._callback_iss
 
     def mark_approved(self) -> None:
         with self._lock:
