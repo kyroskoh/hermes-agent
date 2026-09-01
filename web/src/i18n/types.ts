@@ -238,6 +238,15 @@ export interface Translations {
     perDayAvg: string;
     acrossModels: string;
     inOut: string;
+    // Optional — FORK: kyroskoh/hermes-agent — by-provider breakdown added
+    // so cross-provider attribution is visible without forcing a cascade
+    // edit across all locale files. English fallback is the literal below.
+    perProviderBreakdown?: string;
+    provider?: string;
+    providers?: string;
+    unassigned?: string;
+    apiCallsLabel?: string;
+    modelsLabel?: string;
   };
 
   // ── Models page ──

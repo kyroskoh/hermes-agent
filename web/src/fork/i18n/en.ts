@@ -111,40 +111,10 @@ export interface ForkBackupsTranslations {
   logTailHelp: string;
 }
 
-export interface ForkHonchoTranslations {
-  title: string;
-  intro: string;
-  upstreamNotice: string;
-  standaloneLink: string;
-  standaloneLinkHelp: string;
-  standaloneUnavailable: string;
-  peerLabel: string;
-  peerPlaceholder: string;
-  refreshButton: string;
-  refreshSpinning: string;
-  matchBadgeMatched: string;
-  matchBadgeUnmatched: string;
-  emptyState: string;
-  loadError: string;
-  stateDbPathLabel: string;
-  stateDbIdLabel: string;
-  stateDbModelLabel: string;
-  stateDbMessageCountLabel: string;
-  stateDbProfileLabel: string;
-  honchoSessionLabel: string;
-  honchoActiveLabel: string;
-  honchoInactiveLabel: string;
-  noStateDbMatch: string;
-  summaryMatched: string;
-  summaryTotal: string;
-  summaryDbCount: string;
-}
-
 export interface ForkTranslations {
   personality: ForkPersonalityTranslations;
   fallback: ForkFallbackTranslations;
   backups: ForkBackupsTranslations;
-  honcho: ForkHonchoTranslations;
 }
 
 export const en: ForkTranslations = {
@@ -263,36 +233,5 @@ export const en: ForkTranslations = {
     logBody: "All tiers write to a single log file for grep-ability.",
     logTailCommand: "tail -f /var/log/hermes-backup.log",
     logTailHelp: "Run from any shell to follow tier transitions and per-script exit codes.",
-  },
-  honcho: {
-    title: "Honcho sessions",
-    intro:
-      "Correlate Honcho peer/session state with the matching state.db row. Use this when you need to verify what Hermes actually persisted versus what Honcho remembers — useful for accuracy / debugging reviews, not for surfacing third-party chat content.",
-    upstreamNotice:
-      "Fork-owned: the bridging endpoint /api/honcho/sessions + this page. Upstream-owned: Honcho REST API (local container at :8000, workspace 'hermes').",
-    standaloneLink: "Open Honcho Local",
-    standaloneLinkHelp:
-      "The standalone Honcho Local dashboard runs at :9000 and has the full chat history view. This page is the lightweight dashboard-side link layer.",
-    standaloneUnavailable: "Honcho Local dashboard URL unknown (set HONCHO_LOCAL_DASHBOARD_URL to override)",
-    peerLabel: "Honcho peer",
-    peerPlaceholder: "e.g. Kyros, Wilnice",
-    refreshButton: "Refresh",
-    refreshSpinning: "Refreshing…",
-    matchBadgeMatched: "matched",
-    matchBadgeUnmatched: "no state.db row",
-    emptyState: "No sessions for this peer (or Honcho is unreachable).",
-    loadError: "Failed to load Honcho sessions. Is the local Honcho container up?",
-    stateDbPathLabel: "state.db",
-    stateDbIdLabel: "session id",
-    stateDbModelLabel: "model",
-    stateDbMessageCountLabel: "messages",
-    stateDbProfileLabel: "profile",
-    honchoSessionLabel: "Honcho session",
-    honchoActiveLabel: "active",
-    honchoInactiveLabel: "ended",
-    noStateDbMatch: "no state.db row found (±60 min window)",
-    summaryMatched: "matched",
-    summaryTotal: "sessions",
-    summaryDbCount: "DBs scanned",
   },
 };

@@ -41,7 +41,6 @@ export function useForkI18n(): {
   personality: import("./en").ForkPersonalityTranslations;
   fallback: import("./en").ForkFallbackTranslations;
   backups: import("./en").ForkBackupsTranslations;
-  honcho: import("./en").ForkHonchoTranslations;
 } {
   const { locale } = useI18n();
   const safeLocale: ForkLocale = isForkLocale(locale) ? locale : "en";
@@ -148,34 +147,6 @@ export function useForkI18n(): {
       logBody: pick(localizedMap, en, (m) => m.backups.logBody),
       logTailCommand: pick(localizedMap, en, (m) => m.backups.logTailCommand),
       logTailHelp: pick(localizedMap, en, (m) => m.backups.logTailHelp),
-    },
-    honcho: {
-      title: pick(localizedMap, en, (m) => m.honcho.title),
-      intro: pick(localizedMap, en, (m) => m.honcho.intro),
-      upstreamNotice: pick(localizedMap, en, (m) => m.honcho.upstreamNotice),
-      standaloneLink: pick(localizedMap, en, (m) => m.honcho.standaloneLink),
-      standaloneLinkHelp: pick(localizedMap, en, (m) => m.honcho.standaloneLinkHelp),
-      standaloneUnavailable: pick(localizedMap, en, (m) => m.honcho.standaloneUnavailable),
-      peerLabel: pick(localizedMap, en, (m) => m.honcho.peerLabel),
-      peerPlaceholder: pick(localizedMap, en, (m) => m.honcho.peerPlaceholder),
-      refreshButton: pick(localizedMap, en, (m) => m.honcho.refreshButton),
-      refreshSpinning: pick(localizedMap, en, (m) => m.honcho.refreshSpinning),
-      matchBadgeMatched: pick(localizedMap, en, (m) => m.honcho.matchBadgeMatched),
-      matchBadgeUnmatched: pick(localizedMap, en, (m) => m.honcho.matchBadgeUnmatched),
-      emptyState: pick(localizedMap, en, (m) => m.honcho.emptyState),
-      loadError: pick(localizedMap, en, (m) => m.honcho.loadError),
-      stateDbPathLabel: pick(localizedMap, en, (m) => m.honcho.stateDbPathLabel),
-      stateDbIdLabel: pick(localizedMap, en, (m) => m.honcho.stateDbIdLabel),
-      stateDbModelLabel: pick(localizedMap, en, (m) => m.honcho.stateDbModelLabel),
-      stateDbMessageCountLabel: pick(localizedMap, en, (m) => m.honcho.stateDbMessageCountLabel),
-      stateDbProfileLabel: pick(localizedMap, en, (m) => m.honcho.stateDbProfileLabel),
-      honchoSessionLabel: pick(localizedMap, en, (m) => m.honcho.honchoSessionLabel),
-      honchoActiveLabel: pick(localizedMap, en, (m) => m.honcho.honchoActiveLabel),
-      honchoInactiveLabel: pick(localizedMap, en, (m) => m.honcho.honchoInactiveLabel),
-      noStateDbMatch: pick(localizedMap, en, (m) => m.honcho.noStateDbMatch),
-      summaryMatched: pick(localizedMap, en, (m) => m.honcho.summaryMatched),
-      summaryTotal: pick(localizedMap, en, (m) => m.honcho.summaryTotal),
-      summaryDbCount: pick(localizedMap, en, (m) => m.honcho.summaryDbCount),
     },
   };
 }
