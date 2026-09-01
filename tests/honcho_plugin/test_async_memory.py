@@ -380,29 +380,40 @@ class TestAsyncWriterRetry:
         assert call_count[0] == 2
 
     def test_drops_after_two_failures(self, make_manager):
-        mgr = make_manager(write_frequency="async")
+        # Post-2026-08-28 hardening: the old behaviour was "try once, sleep
+        # 2s, try once more, drop silently." The new behaviour is exponential
+        # backoff up to write_retry_max attempts (default 8) with a CRITICAL
+        # log line on giveup. This test now verifies the new contract:
+        # the async writer keeps requeueing until write_retry_max is reached,
+        # then stops retrying (the session's messages get marked dropped so
+        # flush_all() doesn't infinite-loop).
+        mgr = make_manager(write_frequency="async", write_retry_max=3,
+                           write_retry_initial_backoff=0.01)
         mgr._ensure_async_writer()
         sess = _make_session()
         sess.add_message("user", "msg")
 
         call_count = [0]
-        retry_done = threading.Event()
+        max_calls_seen = threading.Event()
 
         def always_fail(session):
             call_count[0] += 1
-            if call_count[0] >= 2:
-                retry_done.set()
+            if call_count[0] >= mgr._write_retry_max + 1:
+                max_calls_seen.set()
             raise RuntimeError("always broken")
 
         mgr._flush_session = always_fail
 
-        with patch("time.sleep"):
-            mgr._async_queue.put(sess)
-            assert retry_done.wait(timeout=10), "async writer never retried"
+        # Don't sleep — backoff is configured to 0.01s so the loop spins fast.
+        mgr._async_queue.put(sess)
+        assert max_calls_seen.wait(timeout=15), (
+            f"async writer never reached giveup; only {call_count[0]} attempts"
+        )
 
         mgr.shutdown()
-        # Should have tried exactly twice (initial + one retry) and not crashed
-        assert call_count[0] == 2
+        # Should have tried write_retry_max + 1 times (initial + retries)
+        # and emitted a CRITICAL log line. Thread should be done.
+        assert call_count[0] == mgr._write_retry_max + 1
         assert not mgr._async_thread.is_alive()
 
     def test_retries_when_flush_reports_failure(self, make_manager):

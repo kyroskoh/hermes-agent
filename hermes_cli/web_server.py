@@ -16374,6 +16374,195 @@ def _probe_terminal_backend(name: str, terminal_cfg: dict) -> tuple:
 # ---------------------------------------------------------------------------
 
 
+    # Build the candidate chat_id set: include the raw value, its @lid/-lid/
+    # @s.whatsapp.net variants, and every userPeerAliases partner. We do
+    # this once per call so a session listed under an old format can still
+    # be linked to a state.db row in the new format.
+    candidates = _expand_chat_id_candidates(chat_id)
+
+    best: Optional[Tuple[float, Dict[str, Any]]] = None
+    for db_path in _enumerate_profile_state_db_paths():
+        db = _open_session_db_read_only(db_path)
+        if db is None:
+            continue
+        try:
+            # Hermes gateway multiplexed sessions carry their state.db id as
+            # the Honcho session id verbatim (e.g. ``20260822_135536_a2940a``),
+            # so the simplest reliable match is by ``sessions.id``. The
+            # ``chat_id`` LIKE is the fallback for older sessions where the
+            # gateway wrote a different id scheme but the chat_id is still
+            # populated on the row.
+            sql = """
+                SELECT id, source, user_id, session_key, chat_id, profile_name,
+                       display_name, model, started_at, ended_at, end_reason,
+                       message_count
+                FROM sessions
+                WHERE 1=1
+            """
+            params: List[Any] = []
+            clauses: List[str] = []
+            if honcho_session_id:
+                clauses.append("id = ?")
+                params.append(honcho_session_id)
+            if candidates:
+                # (chat_id = cand) OR (chat_id LIKE '%cand%') per candidate
+                chat_clauses: List[str] = []
+                for cand in candidates:
+                    chat_clauses.append("(chat_id = ? OR chat_id LIKE ?)")
+                    params.extend([cand, f"%{cand}%"])
+                if chat_clauses:
+                    clauses.append("(" + " OR ".join(chat_clauses) + ")")
+            if clauses:
+                sql += " AND (" + " OR ".join(clauses) + ")"
+            sql += " ORDER BY started_at DESC LIMIT 25"
+
+            cur = db._conn.execute(sql, params)
+            for row in cur.fetchall():
+                d = dict(row)
+                ts = d.get("started_at") or 0
+                if cutoff_dt is not None:
+                    ts_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                    delta = abs((ts_dt - cutoff_dt).total_seconds())
+                    if delta > _HONCHO_MATCH_WINDOW_SECONDS:
+                        continue
+                    score = delta
+                else:
+                    score = 0.0
+                if best is None or score < best[0]:
+                    best = (score, {
+                        "id": d.get("id"),
+                        "source": d.get("source"),
+                        "user_id": d.get("user_id"),
+                        "session_key": d.get("session_key"),
+                        "chat_id": d.get("chat_id"),
+                        "profile_name": d.get("profile_name"),
+                        "display_name": d.get("display_name"),
+                        "model": d.get("model"),
+                        "started_at": ts,
+                        "ended_at": d.get("ended_at"),
+                        "end_reason": d.get("end_reason"),
+                        "message_count": d.get("message_count"),
+                        "db_path": str(db_path),
+                    })
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    return best[1] if best else None
+
+
+def _expand_chat_id_candidates(chat_id: str) -> List[str]:
+    """Build the set of candidate chat_id forms to match against state.db.
+
+    Returns a deduplicated list that includes:
+      - The chat_id as given
+      - The bare numeric tail stripped of common suffixes (``@lid``,
+        ``-lid``, ``@s.whatsapp.net``)
+      - The tail with each suffix re-applied
+      - userPeerAliases partner IDs (both directions) from honcho.json
+    The point is to bridge the old phone-number-keyed Honcho sessions to
+    the @lid-keyed state.db rows that came in with WhatsApp's 2025-onward
+    inbound LID scheme.
+    """
+    candidates: List[str] = []
+    seen: set[str] = set()
+
+    def _add(value: Optional[str]) -> None:
+        if not value:
+            return
+        if value in seen:
+            return
+        seen.add(value)
+        candidates.append(value)
+
+    def _bare(value: str) -> str:
+        """Strip known chat-id suffixes from a value."""
+        for suf in ("@lid", "-lid", "@s.whatsapp.net", "@c.us", "@g.us"):
+            if value.endswith(suf):
+                return value[: -len(suf)]
+        return value
+
+    _add(chat_id)
+    bare = _bare(chat_id)
+    if bare and bare != chat_id:
+        _add(bare)
+    # Re-apply common suffixes to the bare form
+    if bare and bare != chat_id:
+        for suf in ("@lid", "-lid", "@s.whatsapp.net"):
+            _add(f"{bare}{suf}")
+
+    # Pull userPeerAliases from honcho.json so we can map a phone-number
+    # (or @lid) to its peer name (and vice-versa). Cached for the lifetime
+    # of the dashboard process; honcho.json is hot-reloaded elsewhere when
+    # it changes (the gateway emits rebuild_lookups), so we tolerate stale
+    # entries rather than re-read on every request.
+    aliases = _get_honcho_peer_aliases()
+    if aliases:
+        # Direct lookup: chat_id (or its bare form) -> peer name
+        for key in (chat_id, bare):
+            peer = aliases.get(key)
+            if peer:
+                _add(peer)
+        # Reverse: peer name -> every id that maps to it
+        for known_peer in {aliases.get(chat_id), aliases.get(bare)} - {None}:
+            for k, v in aliases.items():
+                if v == known_peer:
+                    _add(k)
+                    _add(_bare(k))
+
+    return candidates
+
+
+def _get_honcho_peer_aliases() -> Dict[str, str]:
+    """Load the runtime userPeerAliases map from honcho.json (cached).
+
+    Returns an empty dict if the file is missing or malformed. We only
+    care about the ``hermes`` host block's alias map; other host blocks
+    isolated by profile config don't surface to the dashboard's Honcho
+    panel.
+    """
+    global _HONCHO_ALIASES_CACHE
+    try:
+        cache = _HONCHO_ALIASES_CACHE  # type: ignore[name-defined]
+    except NameError:
+        cache = None
+        _HONCHO_ALIASES_CACHE = None  # type: ignore[assignment]
+
+    import os as _os
+    honcho_path = _os.path.expanduser("~/.hermes/honcho.json")
+    try:
+        mtime = _os.path.getmtime(honcho_path)
+    except OSError:
+        return {}
+
+    if cache is not None and cache.get("mtime") == mtime:
+        return cache.get("aliases", {})  # type: ignore[return-value]
+
+    try:
+        with open(honcho_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    aliases: Dict[str, str] = {}
+    hosts = data.get("hosts", {}) if isinstance(data, dict) else {}
+    # Prefer the canonical "hermes" host; fall back to the first available.
+    block = hosts.get("hermes") or {}
+    if not block and hosts:
+        block = next(iter(hosts.values()))
+    for k, v in (block.get("userPeerAliases") or {}).items():
+        if isinstance(k, str) and isinstance(v, str):
+            aliases[k] = v
+
+    globals()["_HONCHO_ALIASES_CACHE"] = {"mtime": mtime, "aliases": aliases}
+    return aliases
+
+
+def urllib_parse_quote(value: str) -> str:
+    """Local alias to avoid pulling urllib.parse at module import time."""
+    import urllib.parse
+    return urllib.parse.quote(value, safe="")
 
 
 

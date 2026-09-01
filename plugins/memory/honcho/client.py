@@ -411,6 +411,17 @@ class HonchoClientConfig:
     # Write frequency: "async" (background thread), "turn" (sync per turn),
     # "session" (flush on session end), or int (every N turns)
     write_frequency: str | int = "async"
+    # Async write retry policy. When a Honcho sync fails (network blip,
+    # container restart, 5xx), the async writer retries with exponential
+    # backoff up to write_retry_max times before giving up and emitting a
+    # CRITICAL log line tagged with the session key. Default: 8 retries
+    # starting at 2s (2, 4, 8, 16, 32, 60, 60, 60 = ~4 min total recovery
+    # window) — long enough to ride out a typical Honcho container restart,
+    # short enough that a stuck session doesn't accumulate forever.
+    write_retry_max: int = 8
+    # Initial backoff for async write retries (seconds). Subsequent retries
+    # use 2x the previous backoff, capped at 60s.
+    write_retry_initial_backoff: float = 2.0
     # Prefetch budget (None = no cap; set to an integer to bound auto-injected context)
     context_tokens: int | None = None
     # Dialectic (peer.chat) settings
@@ -653,6 +664,32 @@ class HonchoClientConfig:
         except (TypeError, ValueError):
             write_frequency = str(raw_wf)
 
+        # Async write retry policy. Both fields are optional; missing values
+        # fall back to the dataclass defaults (8 / 2.0).
+        def _parse_optional_int(value, default):
+            if value is None:
+                return default
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _parse_optional_float(value, default):
+            if value is None:
+                return default
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        write_retry_max = _parse_optional_int(
+            host_block.get("writeRetryMax") or raw.get("writeRetryMax"), 8
+        )
+        write_retry_initial_backoff = _parse_optional_float(
+            host_block.get("writeRetryInitialBackoff") or raw.get("writeRetryInitialBackoff"),
+            2.0,
+        )
+
         # saveMessages: host wins (None-aware since False is valid)
         host_save = host_block.get("saveMessages")
         save_messages = host_save if host_save is not None else raw.get("saveMessages", True)
@@ -703,6 +740,8 @@ class HonchoClientConfig:
             enabled=enabled,
             save_messages=save_messages,
             write_frequency=write_frequency,
+            write_retry_max=write_retry_max,
+            write_retry_initial_backoff=write_retry_initial_backoff,
             context_tokens=_parse_context_tokens(
                 host_block.get("contextTokens"),
                 raw.get("contextTokens"),
