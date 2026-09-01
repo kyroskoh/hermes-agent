@@ -530,6 +530,12 @@ export const api = {
     fetchJSON<ModelsAnalyticsResponse>(
       appendProfileParam(`/api/analytics/models?days=${days}`, profile),
     ),
+  // FORK: kyroskoh/hermes-agent — fleet health for the SystemPage
+  // widget. The /api/fleet/status endpoint is host-level (not
+  // profile-scoped) so the management-profile header is intentionally
+  // NOT appended. The endpoint reads /var/lib/hermes/fleet-status.json
+  // which the hermes-fleet-self-heal cron writes on every tick.
+  getFleetStatus: () => fetchJSON<FleetStatusResponse>("/api/fleet/status"),
   getConfig: (profile = getManagementProfile()) =>
     fetchJSON<Record<string, unknown>>(appendProfileParam("/api/config", profile)),
   getDefaults: () => fetchJSON<Record<string, unknown>>("/api/config/defaults"),
@@ -2389,6 +2395,40 @@ export interface ModelsAnalyticsResponse {
     total_api_calls: number;
   };
   period_days: number;
+}
+
+// FORK: kyroskoh/hermes-agent — fleet health types. The /api/fleet/status
+// endpoint serves /var/lib/hermes/fleet-status.json written by the
+// hermes-fleet-self-heal cron.
+export interface FleetUnitStatus {
+  name: string;
+  active_state: string;
+  sub_state: string;
+  main_pid: number;
+  port: number | null;
+  healthy: boolean;
+  restart_attempted: boolean;
+  restart_succeeded: boolean;
+  restart_seconds: number;
+}
+
+export interface FleetStatusSummary {
+  total: number;
+  healthy: number;
+  restarted: number;
+  failed: number;
+}
+
+export interface FleetStatusResponse {
+  last_probe_at: string | null;
+  last_probe_exit: number | null;
+  host: string | null;
+  summary: FleetStatusSummary;
+  units: FleetUnitStatus[];
+  /** True when the file is missing, corrupt, or older than the cron cadence. */
+  stale: boolean;
+  /** Set when stale is true: file_not_found | read_error: <details> */
+  reason?: string;
 }
 
 export interface CronJobRepeat {

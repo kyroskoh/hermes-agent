@@ -650,6 +650,14 @@ class PlatformConfig:
     token: Optional[str] = None  # Bot token (Telegram, Discord)
     api_key: Optional[str] = None  # API key if different from token
     home_channel: Optional[HomeChannel] = None
+    # Multiple home channels per platform — for operators reachable on more
+    # than one chat (e.g. two WhatsApp LIDs, or a Telegram home + a Discord
+    # admin thread). When set, gateway lifecycle broadcasts (shutdown /
+    # restart / state.db warnings) iterate every entry instead of just the
+    # primary `home_channel`. Existing single-home configs keep working
+    # unchanged; `get_home_channels()` returns `[home_channel]` when only
+    # the singular form is set.
+    home_channels: List[HomeChannel] = field(default_factory=list)
 
     # Reply threading mode (Telegram/Slack)
     # - "off": Never thread replies to original message
@@ -704,6 +712,18 @@ class PlatformConfig:
             result["api_key"] = self.api_key
         if self.home_channel:
             result["home_channel"] = self.home_channel.to_dict()
+        if self.home_channels:
+            # Deduplicate by (chat_id, thread_id) so repeated config reloads
+            # don't broadcast twice to the same destination.
+            seen: set[tuple] = set()
+            deduped: List[HomeChannel] = []
+            for hc in self.home_channels:
+                key = (str(hc.chat_id), str(hc.thread_id) if hc.thread_id else None)
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(hc)
+            result["home_channels"] = [hc.to_dict() for hc in deduped]
         if self.channel_overrides:
             result["channel_overrides"] = {
                 cid: ov.to_dict() for cid, ov in self.channel_overrides.items()
@@ -716,6 +736,35 @@ class PlatformConfig:
         home_channel = None
         if isinstance(data.get("home_channel"), dict):
             home_channel = HomeChannel.from_dict(data["home_channel"])
+
+        # `home_channels` is the plural form for multi-LID operators. Loading
+        # preserves order, deduplicates against the singular form, and skips
+        # malformed entries (defensive: a bad single entry should never
+        # invalidate the whole platform config).
+        home_channels: List[HomeChannel] = []
+        seen_keys: set[tuple] = set()
+        if home_channel is not None:
+            seen_keys.add(
+                (
+                    str(home_channel.chat_id),
+                    str(home_channel.thread_id) if home_channel.thread_id else None,
+                )
+            )
+            home_channels.append(home_channel)
+        raw_home_channels = data.get("home_channels") or []
+        if isinstance(raw_home_channels, list):
+            for entry in raw_home_channels:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    hc = HomeChannel.from_dict(entry)
+                except (KeyError, ValueError, TypeError):
+                    continue
+                key = (str(hc.chat_id), str(hc.thread_id) if hc.thread_id else None)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                home_channels.append(hc)
 
         # gateway_restart_notification may be bridged into extra via the
         # shared-key loop in load_gateway_config(); check both top-level
@@ -751,6 +800,7 @@ class PlatformConfig:
             token=data.get("token"),
             api_key=data.get("api_key"),
             home_channel=home_channel,
+            home_channels=home_channels,
             reply_to_mode=data.get("reply_to_mode", "first"),
             gateway_restart_notification=_coerce_bool(_grn, True),
             typing_indicator=_coerce_bool(_typing, True),
@@ -1102,11 +1152,31 @@ class GatewayConfig:
         return False
     
     def get_home_channel(self, platform: Platform) -> Optional[HomeChannel]:
-        """Get the home channel for a platform."""
+        """Get the home channel for a platform. Returns the first entry from
+        `home_channels` (with the singular `home_channel` acting as a
+        fallback when `home_channels` is empty). Prefer `get_home_channels()`
+        when you need every configured destination — most broadcast loops
+        want all of them, not just the primary one."""
         config = self.platforms.get(platform)
-        if config:
-            return config.home_channel
-        return None
+        if not config:
+            return None
+        if config.home_channels:
+            return config.home_channels[0]
+        return config.home_channel
+
+    def get_home_channels(self, platform: Platform) -> List[HomeChannel]:
+        """All home channels configured for a platform.
+
+        Order: singular `home_channel` first (if set), then entries in
+        `home_channels`. Deduplication happens at load time, so callers can
+        iterate freely without checking for repeats.
+
+        Returns an empty list when the platform is unknown or has no home.
+        """
+        config = self.platforms.get(platform)
+        if not config:
+            return []
+        return list(config.home_channels)
     
     def get_reset_policy(
         self, 

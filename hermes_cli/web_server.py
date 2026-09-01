@@ -17521,6 +17521,75 @@ def _merge_model_rows_across_dbs(
         reverse=True,
     )
     return rows
+# FORK: kyroskoh/hermes-agent — fleet health widget. The hermes-fleet-self-heal
+# cron writes /var/lib/hermes/fleet-status.json on every tick; this endpoint
+# serves the file's contents (with a stale marker if the file is older than
+# 6h) so the SystemPage widget can render fleet health without parsing
+# systemd output client-side.
+#
+# The endpoint is host-level, not profile-scoped: the fleet health is a
+# property of the host (which hermes-*.service units are deployed here),
+# not of any single profile. The dashboard's per-profile selector does
+# not change what this returns.
+FLEET_STATUS_PATH = Path("/var/lib/hermes/fleet-status.json")
+FLEET_STATUS_STALE_SECONDS = 6 * 3600  # matches the cron's run cadence
+
+
+def _read_fleet_status_sync() -> dict:
+    """Read the fleet status JSON, marking it stale if the file is missing
+    or hasn't been refreshed in more than FLEET_STATUS_STALE_SECONDS.
+
+    Returns a dict matching the on-disk schema, plus a top-level ``stale``
+    boolean. Atomic on the file side (the cron writes via tmp+rename), so
+    a half-written file is never observed.
+    """
+    if not FLEET_STATUS_PATH.exists():
+        return {
+            "stale": True,
+            "reason": "file_not_found",
+            "last_probe_at": None,
+            "last_probe_exit": None,
+            "host": None,
+            "summary": {"total": 0, "healthy": 0, "restarted": 0, "failed": 0},
+            "units": [],
+        }
+    try:
+        payload = json.loads(FLEET_STATUS_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        return {
+            "stale": True,
+            "reason": f"read_error: {type(e).__name__}: {e}",
+            "last_probe_at": None,
+            "last_probe_exit": None,
+            "host": None,
+            "summary": {"total": 0, "healthy": 0, "restarted": 0, "failed": 0},
+            "units": [],
+        }
+    age = time.time() - FLEET_STATUS_PATH.stat().st_mtime
+    payload["stale"] = age > FLEET_STATUS_STALE_SECONDS
+    if not payload.get("units"):
+        # Defensive: ensure UI always gets a list, not None.
+        payload["units"] = []
+    if "summary" not in payload:
+        payload["summary"] = {"total": 0, "healthy": 0, "restarted": 0, "failed": 0}
+    return payload
+
+
+@app.get("/api/fleet/status")
+async def get_fleet_status():
+    """Return the latest hermes-fleet-self-heal snapshot.
+
+    The file at /var/lib/hermes/fleet-status.json is written atomically by
+    the cron job (every 6h, plus immediately on any drift event). When the
+    file is missing or older than 6h, returns 200 with ``stale: true`` so
+    the dashboard can render the "no data" state instead of the request
+    failing.
+
+    The endpoint is host-level and intentionally not profile-scoped. The
+    fleet health is a property of the host (which hermes-*.service units
+    are deployed here), not of any single profile.
+    """
+    return await asyncio.to_thread(_read_fleet_status_sync)
 
 
 def _get_models_analytics(days: int = 30, profile: Optional[str] = None):

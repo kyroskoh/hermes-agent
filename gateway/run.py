@@ -11705,11 +11705,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Snapshot adapters up front: adapter.send() can hit a fatal error
         # path that pops the adapter from self.adapters (see _handle_fatal
         # elsewhere), which would otherwise trigger
-        # ``RuntimeError: dictionary changed size during iteration`` —
-        # observed in a user report during gateway shutdown.
+        # ``RuntimeError: dictionary changed size during iteration`` — observed
+        # in a user report during gateway shutdown.
         for platform, adapter in list(self.adapters.items()):
-            home = self.config.get_home_channel(platform)
-            if not home or not home.chat_id:
+            # Multi-home broadcast: an operator reachable on more than one
+            # chat (e.g. two WhatsApp LIDs, or a Telegram home + a Discord
+            # admin thread) gets every configured home. `get_home_channels()`
+            # already includes the singular `home_channel` for back-compat,
+            # so single-home configs behave exactly as before.
+            homes = self.config.get_home_channels(platform)
+            if not homes:
                 continue
 
             platform_cfg = self.config.platforms.get(platform)
@@ -11720,41 +11725,44 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 continue
 
-            dedup_key = (platform.value, str(home.chat_id), str(home.thread_id) if home.thread_id else None)
-            if dedup_key in notified:
-                continue
+            for home in homes:
+                if not home or not home.chat_id:
+                    continue
+                dedup_key = (platform.value, str(home.chat_id), str(home.thread_id) if home.thread_id else None)
+                if dedup_key in notified:
+                    continue
 
-            try:
-                metadata = self._thread_metadata_for_target(
-                    platform,
-                    home.chat_id,
-                    home.thread_id,
-                    adapter=adapter,
-                )
-                if metadata:
-                    result = await adapter.send(str(home.chat_id), msg, metadata=metadata)
-                else:
-                    result = await adapter.send(str(home.chat_id), msg)
-                if result is not None and getattr(result, "success", True) is False:
+                try:
+                    metadata = self._thread_metadata_for_target(
+                        platform,
+                        home.chat_id,
+                        home.thread_id,
+                        adapter=adapter,
+                    )
+                    if metadata:
+                        result = await adapter.send(str(home.chat_id), msg, metadata=metadata)
+                    else:
+                        result = await adapter.send(str(home.chat_id), msg)
+                    if result is not None and getattr(result, "success", True) is False:
+                        logger.debug(
+                            "Failed to send shutdown notification to home channel %s:%s: %s",
+                            platform.value,
+                            home.chat_id,
+                            getattr(result, "error", "send returned success=False"),
+                        )
+                        continue
+
+                    notified.add(dedup_key)
+                    logger.info(
+                        "Sent shutdown notification to home channel %s:%s",
+                        platform.value,
+                        home.chat_id,
+                    )
+                except Exception as e:
                     logger.debug(
                         "Failed to send shutdown notification to home channel %s:%s: %s",
                         platform.value,
                         home.chat_id,
-                        getattr(result, "error", "send returned success=False"),
-                    )
-                    continue
-
-                notified.add(dedup_key)
-                logger.info(
-                    "Sent shutdown notification to home channel %s:%s",
-                    platform.value,
-                    home.chat_id,
-                )
-            except Exception as e:
-                logger.debug(
-                    "Failed to send shutdown notification to home channel %s:%s: %s",
-                    platform.value,
-                    home.chat_id,
                     e,
                 )
 
@@ -26461,49 +26469,55 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
 
         for platform, platform_cfg in self.config.platforms.items():
-            home = platform_cfg.home_channel
-            if not home or not home.chat_id:
+            # Multi-home broadcast: same dedup as the shutdown path. An
+            # operator reachable on multiple chats (e.g. two WhatsApp LIDs)
+            # gets every configured home.
+            homes = list(platform_cfg.home_channels)
+            if not homes:
                 continue
             transport = resolve_delivery_transport(platform, self.config, self.adapters)
             if transport is None:
                 continue
-            try:
-                metadata = self._thread_metadata_for_target(
-                    platform,
-                    home.chat_id,
-                    home.thread_id,
-                    adapter=transport.adapter,
-                )
-                if transport.is_relay:
-                    metadata = dict(metadata or {})
-                    if home.user_id:
-                        metadata["user_id"] = home.user_id
-                    if home.scope_id:
-                        metadata["scope_id"] = home.scope_id
-                send_metadata = _non_conversational_metadata(metadata, platform=platform)
-                if send_metadata is not None or transport.is_relay:
-                    result = await transport.send(
+            for home in homes:
+                if not home or not home.chat_id:
+                    continue
+                try:
+                    metadata = self._thread_metadata_for_target(
                         platform,
-                        str(home.chat_id),
-                        message,
-                        metadata=send_metadata,
+                        home.chat_id,
+                        home.thread_id,
+                        adapter=transport.adapter,
                     )
-                else:
-                    result = await transport.adapter.send(str(home.chat_id), message)
-                if result is not None and getattr(result, "success", True) is False:
+                    if transport.is_relay:
+                        metadata = dict(metadata or {})
+                        if home.user_id:
+                            metadata["user_id"] = home.user_id
+                        if home.scope_id:
+                            metadata["scope_id"] = home.scope_id
+                    send_metadata = _non_conversational_metadata(metadata, platform=platform)
+                    if send_metadata is not None or transport.is_relay:
+                        result = await transport.send(
+                            platform,
+                            str(home.chat_id),
+                            message,
+                            metadata=send_metadata,
+                        )
+                    else:
+                        result = await transport.adapter.send(str(home.chat_id), message)
+                    if result is not None and getattr(result, "success", True) is False:
+                        logger.warning(
+                            "state.db warning notification failed for %s:%s: %s",
+                            platform.value,
+                            home.chat_id,
+                            getattr(result, "error", "send returned success=False"),
+                        )
+                except Exception as exc:
                     logger.warning(
                         "state.db warning notification failed for %s:%s: %s",
                         platform.value,
                         home.chat_id,
-                        getattr(result, "error", "send returned success=False"),
+                        exc,
                     )
-            except Exception as exc:
-                logger.warning(
-                    "state.db warning notification failed for %s:%s: %s",
-                    platform.value,
-                    home.chat_id,
-                    exc,
-                )
 
     def _set_session_env(self, context: SessionContext) -> list:
         """Set session context variables for the current async task.
