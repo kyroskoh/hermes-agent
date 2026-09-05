@@ -276,6 +276,12 @@ _check_fn_cache: Dict[tuple[Callable, Optional[str]], tuple[float, bool]] = {}
 _check_fn_last_good: Dict[tuple[Callable, Optional[str]], float] = {}
 _check_fn_cache_lock = threading.Lock()
 CHECK_FN_CACHE_BYPASS = ""
+# Profile-unresolved sentinel: returned by ``check_fn_cache_scope`` when
+# multiplexing is active but neither HERMES_HOME override nor an active
+# secret scope has been installed. Callers MUST treat ``None`` from
+# ``_check_fn_cached`` as "unknown; will be re-evaluated per turn" rather
+# than "unavailable" — see Section N of the state-db-reliability design.
+CHECK_FN_UNRESOLVED = "__UNRESOLVED__"
 _NO_CACHE_CHECK_FNS: Set[Callable] = set()
 
 
@@ -338,11 +344,20 @@ def check_fn_cache_scope() -> Optional[str]:
 
         override = get_hermes_home_override()
         if not override:
-            return CHECK_FN_CACHE_BYPASS
+            # Section N: profile is multiplexed but no profile turn has
+            # installed the override yet (startup, dashboard refresh, an
+            # adapter-side tool probe). Returning CHECK_FN_UNRESOLVED
+            # makes ``_check_fn_cached`` short-circuit BEFORE calling
+            # fn(), so secret-bound tools (Discord/HASS/Firecrawl) come
+            # up "unknown" instead of either crashing with
+            # ``UnscopedSecretError`` or being falsely marked unavailable
+            # for the lifetime of the process.
+            return CHECK_FN_UNRESOLVED
         return str(Path(override).expanduser().resolve())
     except Exception:
-        # Fail closed: bypass both cache layers rather than aliasing requests
-        # whose multiplex profile identity could not be resolved.
+        # Fail closed: bypass both cache layers rather than aliasing
+        # requests whose multiplex profile identity could not be
+        # resolved.
         return CHECK_FN_CACHE_BYPASS
 
 
@@ -361,12 +376,28 @@ def _run_check_fn_uncached(fn: Callable, *, unresolved_scope: bool = False) -> b
         return False
 
 
-def _check_fn_cached(fn: Callable) -> bool:
-    """Return bool(fn()), TTL-cached across calls."""
+def _check_fn_cached(fn: Callable) -> Optional[bool]:
+    """Return bool(fn()), TTL-cached across calls.
+
+    Returns ``None`` (not False) when the active profile scope cannot be
+    resolved: the check cannot be evaluated without a secret scope, and
+    returning False would mark the tool unavailable for the lifetime of
+    the process, which is wrong — the tool will become available the
+    moment a profile is resolved and the next turn runs. Callers in
+    ``get_definitions`` MUST treat ``None`` as "skip this definition
+    from the bundled response; the per-turn resolver will pick it up
+    later". See Section N of the state-db-reliability design.
+    """
     now = time.monotonic()
     if fn in _NO_CACHE_CHECK_FNS:
         return _run_check_fn_uncached(fn)
     scope = check_fn_cache_scope()
+    if scope == CHECK_FN_UNRESOLVED:
+        # Profile not resolved yet — refuse to call fn() (it would raise
+        # UnscopedSecretError under multiplexing). Treat as unknown, not
+        # as unavailable. Cached under its own bucket so we don't pollute
+        # the per-profile verdict.
+        return None
     if scope == CHECK_FN_CACHE_BYPASS:
         return _run_check_fn_uncached(fn, unresolved_scope=True)
     cache_key = (fn, scope)
@@ -528,7 +559,14 @@ class ToolRegistry:
             if not entry.check_fn:
                 return True
             if entry.check_fn not in check_results:
-                check_results[entry.check_fn] = _check_fn_cached(entry.check_fn)
+                v = _check_fn_cached(entry.check_fn)
+                # Section N: ``None`` means "unknown; profile not yet
+                # resolved". An unknown check is NOT a True — it just means
+                # we cannot classify the toolset yet. Return False for
+                # toolset-level classification (matches the pre-fix
+                # behavior so a toolset that contains a secret-bound tool
+                # does not falsely appear exposable during startup).
+                check_results[entry.check_fn] = bool(v) if v is not None else False
             if check_results[entry.check_fn]:
                 return True
         return False
@@ -1056,7 +1094,9 @@ class ToolRegistry:
         # Per-call cache on top of the 30 s TTL — handles repeat probes of the
         # same check_fn within one definitions pass without re-reading the
         # TTL clock.
-        check_results: Dict[Callable, bool] = {}
+        # NOTE: values are ``Optional[bool]`` — None means "profile scope
+        # unresolved; defer to per-turn resolution" (Section N).
+        check_results: Dict[Callable, Optional[bool]] = {}
         entries_by_name = {entry.name: entry for entry in self._snapshot_entries()}
         for name in sorted(tool_names):
             entry = entries_by_name.get(name)
@@ -1064,8 +1104,25 @@ class ToolRegistry:
                 continue
             if entry.check_fn:
                 if entry.check_fn not in check_results:
-                    check_results[entry.check_fn] = _check_fn_cached(entry.check_fn)
-                if not check_results[entry.check_fn]:
+                    v = _check_fn_cached(entry.check_fn)
+                    # Section N: ``None`` = "unknown; profile not yet
+                    # resolved". Treat as "skip" — the per-turn resolver
+                    # will pick the tool up the moment a profile scope is
+                    # installed.
+                    if v is None:
+                        check_results[entry.check_fn] = None
+                    else:
+                        check_results[entry.check_fn] = bool(v)
+                verdict = check_results[entry.check_fn]
+                if verdict is None:
+                    if not quiet:
+                        logger.debug(
+                            "Tool %s deferred (profile scope unresolved); "
+                            "will be re-evaluated per turn",
+                            name,
+                        )
+                    continue
+                if not verdict:
                     if not quiet:
                         logger.debug("Tool %s unavailable (check failed)", name)
                     continue

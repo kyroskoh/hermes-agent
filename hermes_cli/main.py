@@ -14691,6 +14691,46 @@ def main():
         cmd_dashboard_register=cmd_dashboard_register,
     )
 
+    # =========================================================================
+    # db command  (parser built in hermes_cli/subcommands/db_admin.py)
+    #
+    # Imported under aliases to avoid shadowing the module-level `cmd_status`
+    # that build_status_parser() expects (defined at the top of main()).
+    # Each db subcommand sets its own `func` default in build_db_parser,
+    # so the outer parser's set_defaults just dispatches to the right cmd_*.
+    # =========================================================================
+    from hermes_cli.subcommands.db_admin import (
+        cmd_status as _db_cmd_status,
+        cmd_check as _db_cmd_check,
+        cmd_backup as _db_cmd_backup,
+        cmd_repair_fts as _db_cmd_repair_fts,
+        cmd_recover as _db_cmd_recover,
+        cmd_restore as _db_cmd_restore,
+        cmd_holders as _db_cmd_holders,
+        cmd_pending as _db_cmd_pending,
+        cmd_replay_pending as _db_cmd_replay_pending,
+        cmd_maintenance_on as _db_cmd_maintenance_on,
+        cmd_maintenance_off as _db_cmd_maintenance_off,
+        cmd_preflight as _db_cmd_preflight,
+        build_db_parser,
+    )
+    db_parser = build_db_parser(subparsers)
+    db_parser.set_defaults(func=lambda args: (
+        _db_cmd_status(args) if args.db_cmd == "status" else
+        _db_cmd_check(args) if args.db_cmd == "check" else
+        _db_cmd_backup(args) if args.db_cmd == "backup" else
+        _db_cmd_repair_fts(args) if args.db_cmd == "repair-fts" else
+        _db_cmd_recover(args) if args.db_cmd == "recover" else
+        _db_cmd_restore(args) if args.db_cmd == "restore" else
+        _db_cmd_holders(args) if args.db_cmd == "holders" else
+        _db_cmd_pending(args) if args.db_cmd == "pending" else
+        _db_cmd_replay_pending(args) if args.db_cmd == "replay-pending" else
+        _db_cmd_maintenance_on(args) if args.db_cmd == "maintenance-on" else
+        _db_cmd_maintenance_off(args) if args.db_cmd == "maintenance-off" else
+        _db_cmd_preflight(args) if args.db_cmd == "preflight" else
+        (db_parser.print_help() or 1)
+    ))
+
 
     # =========================================================================
     # desktop (a.k.a. gui) command

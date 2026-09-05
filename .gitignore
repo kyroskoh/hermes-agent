@@ -216,3 +216,6 @@ native/fts5_cjk/*.so
 
 # Disposable profile created by scripts/probe_active_session_exclusivity.py
 .probe-home/
+
+# Monkeypatch artifacts — worktree-only, regenerated per-merge, never committed
+/.monkeypatch/
