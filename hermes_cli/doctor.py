@@ -2055,10 +2055,22 @@ def run_doctor(args):
             # through the triggers. `_db_opens_cleanly` now drives a rolled-back
             # write so this otherwise-silent corruption class is surfaced (and
             # repaired in place with --fix).
-            from hermes_state import _db_opens_cleanly, repair_state_db_schema
+            from hermes_state import (
+                _db_opens_cleanly, is_malformed_db_error, repair_state_db_schema,
+            )
 
             _write_reason = _db_opens_cleanly(state_db_path)
             if _write_reason is not None:
+                # A corrupt page can surface while exercising an FTS trigger,
+                # but that does not make it an FTS-only fault.  In-place FTS
+                # surgery is unsafe when SQLite itself reports SQLITE_CORRUPT.
+                _structural = is_malformed_db_error(
+                    sqlite3.DatabaseError(_write_reason)
+                )
+                if _structural:
+                    # Dispatch to the structural branch below. It deliberately
+                    # does not invoke repair_state_db_schema.
+                    raise sqlite3.DatabaseError(_write_reason)
                 check_warn(
                     f"{_DHH}/state.db fails a write-health probe (FTS index may be corrupt)",
                     f"({_write_reason})",
@@ -2090,9 +2102,21 @@ def run_doctor(args):
                         "(or 'hermes sessions repair') to rebuild the FTS index"
                     )
         except Exception as e:
-            from hermes_state import is_malformed_db_error, repair_state_db_schema
+            from hermes_state import (
+                is_malformed_db_error, is_malformed_schema_error,
+                repair_state_db_schema,
+            )
 
-            if is_malformed_db_error(e):
+            if is_malformed_db_error(e) and not is_malformed_schema_error(e):
+                check_fail(
+                    "STRUCTURAL_CORRUPTION — production DB must not be repaired in place.",
+                    f"({e})",
+                )
+                issues.append(
+                    "state.db structural corruption — preserve forensic data and restore "
+                    "a verified backup with hermes-state-db-recover.sh --auto"
+                )
+            elif is_malformed_db_error(e):
                 # sqlite_master itself is malformed (e.g. duplicate
                 # messages_fts) — every statement fails before it runs, so
                 # this is NOT a plain FTS-index rebuild. Repair sqlite_master

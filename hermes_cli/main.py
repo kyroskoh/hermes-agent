@@ -14579,6 +14579,20 @@ def main():
         help="JSON report path (defaults to <output>.recovery.json)",
     )
 
+    sessions_smart_recover = sessions_subparsers.add_parser(
+        "smart-recover",
+        help="Classify or safely recover the default state.db in a detached unit",
+        description=(
+            "Uses Hermes's fail-closed production recovery workflow. Structural "
+            "corruption is preserved for forensics and restored only from a "
+            "fully validated backup; no live database is repaired in place."
+        ),
+    )
+    sessions_smart_recover.add_argument(
+        "--auto", action="store_true",
+        help="Start detached recovery after classification (required for changes)",
+    )
+
     sessions_subparsers.add_parser("stats", help="Show session store statistics")
 
     sessions_rename = sessions_subparsers.add_parser(

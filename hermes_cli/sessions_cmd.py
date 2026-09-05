@@ -130,6 +130,25 @@ def cmd_sessions(args, sessions_parser=None):
     # malformed schema is exactly the case where SessionDB() can't open.
     # Recovery additionally promises never to open the supplied source
     # directly, so it operates through its own disposable source copy.
+    if action == "smart-recover":
+        import subprocess
+
+        smart = get_hermes_home() / "scripts" / "hermes-state-db-smart-recover.sh"
+        recover = get_hermes_home() / "scripts" / "hermes-state-db-recover.sh"
+        if not smart.is_file() or not recover.is_file():
+            print(
+                "Error: Hermes state-db recovery scripts are not installed at "
+                f"{smart.parent}."
+            )
+            return 1
+        if not getattr(args, "auto", False):
+            # The smart script's check path is deliberately non-mutating.
+            return subprocess.run([str(smart)], check=False).returncode
+        # The wrapper uses systemd-run and returns immediately. It must be a
+        # separate process because it may gracefully terminate this REPL after
+        # collecting forensic WAL/SHM descriptors.
+        return subprocess.run([str(recover), "--auto"], check=False).returncode
+
     if action == "repair":
         from hermes_state import (
             DEFAULT_DB_PATH,
