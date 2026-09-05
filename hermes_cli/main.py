@@ -14707,6 +14707,7 @@ def main():
         cmd_recover as _db_cmd_recover,
         cmd_restore as _db_cmd_restore,
         cmd_holders as _db_cmd_holders,
+        cmd_archive_validate as _db_cmd_archive_validate,
         cmd_pending as _db_cmd_pending,
         cmd_replay_pending as _db_cmd_replay_pending,
         cmd_maintenance_on as _db_cmd_maintenance_on,
@@ -14723,6 +14724,7 @@ def main():
         _db_cmd_recover(args) if args.db_cmd == "recover" else
         _db_cmd_restore(args) if args.db_cmd == "restore" else
         _db_cmd_holders(args) if args.db_cmd == "holders" else
+        _db_cmd_archive_validate(args) if args.db_cmd == "archive-validate" else
         _db_cmd_pending(args) if args.db_cmd == "pending" else
         _db_cmd_replay_pending(args) if args.db_cmd == "replay-pending" else
         _db_cmd_maintenance_on(args) if args.db_cmd == "maintenance-on" else

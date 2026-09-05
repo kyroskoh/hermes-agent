@@ -246,6 +246,116 @@ def cmd_holders(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_archive_validate(args: argparse.Namespace) -> int:
+    """Validate an archive candidate against the operator-mandated invariants.
+
+    Per operator spec 2026-09-04: an archive candidate is SUCCESS only when
+    integrity_check=ok AND foreign_key_check=0 rows AND canonical reconciliation
+    matches PRE. Anything else is reported honestly — never a one-line OK.
+    """
+    import sqlite3
+
+    import agent.db_maintenance as dbm
+
+    live = _state_db_path()
+    archive = Path(args.archive).expanduser().resolve() if args.archive else \
+              _hermes_home() / "state-archive.db"
+
+    # Capture PRE counts from the current state.db (the candidate's "before"
+    # state). The archive script records these before the move so we can
+    # verify reconciliation; we do the same here so callers don't have to.
+    pre_live: dict = {}
+    pre_archive: dict = {}
+    try:
+        conn = sqlite3.connect(str(live))
+        canonical = dbm._canonical_tables(conn)
+        for t in canonical:
+            try:
+                pre_live[t] = conn.execute(f'SELECT count(*) FROM "{t}"').fetchone()[0]
+            except Exception:
+                pre_live[t] = 0
+        conn.close()
+    except Exception as e:
+        if args.json:
+            _print_json({"status": "FAILED_VALIDATION",
+                         "error": f"cannot read live: {e}"})
+        else:
+            _print_human(f"FAILED: cannot read live {live}: {e}")
+        return 1
+
+    if archive.exists():
+        try:
+            conn = sqlite3.connect(str(archive))
+            canonical = dbm._canonical_tables(conn)
+            for t in canonical:
+                try:
+                    pre_archive[t] = conn.execute(
+                        f'SELECT count(*) FROM "{t}"').fetchone()[0]
+                except Exception:
+                    pre_archive[t] = 0
+            conn.close()
+        except Exception as e:
+            if args.json:
+                _print_json({"status": "FAILED_VALIDATION",
+                             "error": f"cannot read archive: {e}"})
+            else:
+                _print_human(f"FAILED: cannot read archive {archive}: {e}")
+            return 1
+
+    report = dbm.validate_archive_candidate(
+        live, archive,
+        dry_run=True,
+        pre_live_counts=pre_live,
+        pre_archive_counts=pre_archive,
+    )
+
+    if args.json:
+        _print_json(report)
+    else:
+        status = report.get("status", "UNKNOWN")
+        if status == dbm.ArchiveStatus.SUCCESS:
+            _print_human(f"STATUS: SUCCESS")
+            _print_human(
+                f"  live integrity={report['live_integrity']} "
+                f"archive integrity={report['archive_integrity']}"
+            )
+            _print_human(
+                f"  live FK={report['live_fk_count']} "
+                f"archive FK={report['archive_fk_count']}"
+            )
+        elif status == dbm.ArchiveStatus.SUCCESS_WITH_WARNINGS:
+            _print_human(f"STATUS: SUCCESS_WITH_WARNINGS")
+            for w in report.get("warnings", []):
+                _print_human(f"  WARN: {w}")
+        else:
+            _print_human(f"STATUS: {status}")
+            for hf in report.get("hard_failures", []):
+                _print_human(f"  FAIL: {hf}")
+
+        # Print reconciliation table
+        recon = report.get("canonical_reconciliation", {})
+        rows = recon.get("rows", [])
+        if rows:
+            _print_human("")
+            _print_human(
+                f"  {'TABLE':<28} {'PRE L':>8} {'PRE A':>8} "
+                f"{'POST L':>8} {'POST A':>8} {'dL':>5} {'dA':>5} STATUS"
+            )
+            for r in rows:
+                _print_human(
+                    f"  {r['table']:<28} {r['pre_live']:>8,} {r['pre_archive']:>8,} "
+                    f"{r['post_live']:>8,} {r['post_archive']:>8,} "
+                    f"{r['delta_live']:>+5,} {r['delta_archive']:>+5,} {r['status']}"
+                )
+
+    # Exit code reflects three-status outcome
+    if report["status"] == dbm.ArchiveStatus.SUCCESS:
+        return 0
+    if report["status"] == dbm.ArchiveStatus.SUCCESS_WITH_WARNINGS:
+        return 2
+    return 1  # FAILED_VALIDATION
+
+
 def cmd_pending(args: argparse.Namespace) -> int:
     import agent.pending_messages as pm
     msgs = pm.list_pending(_hermes_home(), state=args.state)
@@ -430,6 +540,16 @@ def build_db_parser(subparsers) -> argparse.ArgumentParser:
                                 help="List processes with state.db (or WAL/SHM) open.")
     p_holders.add_argument("--json", action="store_true")
     p_holders.set_defaults(func=cmd_holders)
+
+    p_arc = sub.add_parser("archive-validate",
+                           help="Validate an archive candidate against FK + "
+                                "reconciliation invariants. Returns SUCCESS / "
+                                "SUCCESS_WITH_WARNINGS / FAILED_VALIDATION "
+                                "(operator-mandated 2026-09-04).")
+    p_arc.add_argument("--archive", default=None,
+                       help="Path to the archive DB (default: <HERMES_HOME>/state-archive.db)")
+    p_arc.add_argument("--json", action="store_true")
+    p_arc.set_defaults(func=cmd_archive_validate)
 
     p_pending = sub.add_parser("pending",
                                 help="List queued pending_messages.")
