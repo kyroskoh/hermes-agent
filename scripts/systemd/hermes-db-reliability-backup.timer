@@ -1,0 +1,20 @@
+# Ticks hermes-db-reliability-backup.service hourly, per PLAN.md PR3
+# proposed retention: 48 hourly snapshots + 14 daily. Persistent=true so a
+# missed hour (host down) still runs once at boot rather than silently
+# extending the gap toward the 2-hour staleness alert threshold.
+
+[Unit]
+Description=Hermes state-db verified backup timer (hourly)
+Documentation=https://hermes-agent.nousresearch.com/docs
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+Persistent=true
+AccuracySec=5min
+# Stagger away from the top of the hour so this doesn't compete with other
+# hourly host jobs for I/O at :00.
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

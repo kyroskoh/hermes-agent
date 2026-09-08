@@ -1,0 +1,30 @@
+# PR3: daily restore drill. Extracts the current latest-good verified
+# backup into an isolated tempdir and exercises real SessionDB reads,
+# an append, and a readback (plus a gateway_routing read) against the
+# COPY — never the live database. See drill() in
+# scripts/db_reliability_host.py. Writes
+# $HERMES_HOME/backups/verified/latest-drill.json; a failed or stale
+# drill exits non-zero without touching any live data.
+#
+# NOT installed/enabled by this repo — see scripts/systemd/README.md.
+
+[Unit]
+Description=Hermes state-db restore drill (isolated copy, daily)
+Documentation=https://hermes-agent.nousresearch.com/docs
+# The drill reads whatever the backup timer produced; run after it so a
+# fresh host doesn't drill against a stale or absent snapshot.
+After=hermes-db-reliability-backup.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/.hermes
+Environment="HOME=/root"
+Environment="HERMES_HOME=/root/.hermes"
+Environment="PATH=/usr/local/lib/hermes-agent/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/usr/local/lib/hermes-agent/venv/bin/python3 \
+    /usr/local/lib/hermes-agent/scripts/db_reliability_host.py drill \
+    --home /root/.hermes --output /root/.hermes/backups/verified
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal

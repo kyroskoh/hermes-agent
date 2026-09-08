@@ -1,0 +1,77 @@
+# PR5 (recovery-data and service lifecycle correctness): reviewed
+# foreground replacement for the deployed hermes-dashboard.service, which
+# currently uses Type=forking around scripts/hermes-dashboard.sh (a
+# setsid-backgrounded launch + a `ss -tlnp | grep :PORT` listener-by-port
+# scrape to find the real PID afterward — service status alone proves only
+# that *something* is on the port, not that it is this dashboard, nor that
+# it is answering HTTP, nor that config/session state actually persisted).
+#
+# Foreground operation IS supported here: `hermes dashboard` never
+# daemonizes. Its only self-relaunch is the named-profile -> machine-level
+# redirect in hermes_cli/main.py (cmd_dashboard), which on Linux uses
+# os.execvpe() — a true execve() that keeps the same PID, not a
+# fork+exit. (Windows falls back to subprocess.Popen()+sys.exit() there,
+# which is irrelevant to a systemd unit.) The machine-level launch this
+# unit performs (no --profile) does not hit that redirect at all: it runs
+# start_server() directly in the ExecStart process, so Type=exec/simple
+# tracks the real long-lived process from the first instant.
+#
+# This eliminates the PID-file + listener-scrape dance entirely — systemd
+# tracks the cgroup's actual process, not a port scrape.
+#
+# What this unit does NOT solve (still true after this change, per the
+# plan): service status is still not proof of HTTP readiness or that a
+# write actually persisted. Verify those separately (curl the dashboard's
+# health/status endpoint; check `hermes db status` for the backing state.db)
+# before declaring a migration successful — do not rely on
+# `systemctl is-active` alone.
+#
+# NOT installed/enabled by this repo. Recommended rollout, matching
+# PLAN.md's staged-rollout requirement:
+#   1. Canary this on hermes-dashboard-wilnice.service first (lower blast
+#      radius than the primary kyros dashboard), during a maintenance
+#      window.
+#   2. Confirm: `systemctl status`, the dashboard answers HTTP on its bound
+#      port, and a config/session write survives a `systemctl restart`.
+#   3. Only then replace the primary hermes-dashboard.service the same way,
+#      and retire scripts/hermes-dashboard.sh's `start`/`stop` handling (its
+#      `status` reporting may still be useful standalone).
+#   4. If the operator has a Claude Code skill/runbook documenting the old
+#      listener-by-port procedure, update it to reference this unit instead.
+
+[Unit]
+Description=Hermes Agent Web Dashboard (kyros profile, internal 127.0.0.1:19119)
+Documentation=https://hermes-agent.nousresearch.com/docs
+After=network-online.target docker.service
+Wants=network-online.target
+Wants=hermes-stack.target
+After=hermes-stack.target
+# Belongs in [Unit], not [Service] — the deployed hermes-dashboard.service
+# has this in [Service], where systemd silently ignores it ("Unknown key
+# name 'StartLimitIntervalSec'", confirmed via `systemd-analyze verify`).
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=root
+Environment=HOME=/root
+Environment=HERMES_HOME=/root/.hermes
+Environment="PATH=/usr/local/lib/hermes-agent/venv/bin:/usr/local/bin:/usr/bin:/bin"
+WorkingDirectory=/root/.hermes
+
+# Same flags scripts/hermes-dashboard.sh passed, minus the setsid backgrounding.
+ExecStart=/usr/local/lib/hermes-agent/venv/bin/python3 -m hermes_cli.main dashboard \
+    --host 127.0.0.1 --port 19119 --no-open --skip-build
+
+# No PIDFile / ExecStop needed: Type=exec + the cgroup IS the process
+# tracking. Default stop is SIGTERM to the tracked PID.
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+NoNewPrivileges=false
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,31 @@
+# PR3 (db-corruption-mitigation-20260908): non-mutating 5-minute health
+# check. Runs agent/db_health.classify + holder/journal-mode/backup-age
+# checks across every profile DB via scripts/db_reliability_host.py.
+#
+# NEVER repairs, restarts, or sends messages — see scripts/db_reliability_host.py
+# module docstring. Writes $HERMES_HOME/backups/verified/health.json and
+# exits non-zero on any DEGRADED/CORRUPT/RECOVERY_REQUIRED/warning
+# condition so `systemctl --failed` and OnFailure= see it.
+#
+# NOT installed/enabled by this repo. Install only after this branch has
+# been deployed to /usr/local/lib/hermes-agent (see scripts/systemd/README.md
+# for the staged rollout this plan requires before touching the shared DB).
+
+[Unit]
+Description=Hermes state-db reliability check (non-mutating)
+Documentation=https://hermes-agent.nousresearch.com/docs
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/.hermes
+Environment="HOME=/root"
+Environment="HERMES_HOME=/root/.hermes"
+Environment="PATH=/usr/local/lib/hermes-agent/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/usr/local/lib/hermes-agent/venv/bin/python3 \
+    /usr/local/lib/hermes-agent/scripts/db_reliability_host.py check \
+    --home /root/.hermes --output /root/.hermes/backups/verified
+# A single check must not accumulate; kill and let the next tick run fresh.
+TimeoutStartSec=90
+StandardOutput=journal
+StandardError=journal

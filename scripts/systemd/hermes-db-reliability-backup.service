@@ -1,0 +1,32 @@
+# PR3: hourly verified backup. Snapshots every profile DB via SQLite's
+# backup API (not a raw file copy), extracts the finished archive into a
+# fresh directory and re-validates the copy (integrity_check,
+# foreign_key_check, FTS presence, row counts) before it is allowed to
+# become $HERMES_HOME/backups/verified/latest-good.json. A failed or
+# unverifiable snapshot exits non-zero and never touches latest-good —
+# see validate_copy()/backup() in scripts/db_reliability_host.py.
+#
+# Retention (48 hourly + 14 daily) is enforced by the script itself, not
+# by this unit.
+#
+# NOT installed/enabled by this repo — see scripts/systemd/README.md.
+
+[Unit]
+Description=Hermes state-db verified hourly backup
+Documentation=https://hermes-agent.nousresearch.com/docs
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/.hermes
+Environment="HOME=/root"
+Environment="HERMES_HOME=/root/.hermes"
+Environment="PATH=/usr/local/lib/hermes-agent/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/usr/local/lib/hermes-agent/venv/bin/python3 \
+    /usr/local/lib/hermes-agent/scripts/db_reliability_host.py backup \
+    --home /root/.hermes --output /root/.hermes/backups/verified
+# A SQLite Connection.backup() over a large WAL DB can take a while under
+# contention; give it real headroom rather than racing the next hourly tick.
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal

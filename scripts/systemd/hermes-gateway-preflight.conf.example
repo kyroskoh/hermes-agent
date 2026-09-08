@@ -1,0 +1,25 @@
+# Optional drop-in for hermes-gateway.service (and any other gateway unit,
+# e.g. hermes-gateway-wilnice.service) that refuses to start when
+# state.db needs recovery or maintenance is active, instead of starting
+# against a database the watchdog already knows is broken.
+#
+# `hermes db preflight` (hermes_cli/subcommands/db_admin.py:cmd_preflight)
+# is non-mutating: it only reads the maintenance-lock marker and runs
+# agent.db_health.classify(full=False). Exit codes: 0 = safe to start,
+# 1 = maintenance active, 2 = recovery required, 3 = db missing.
+#
+# This file is NOT installed by this repo and does not modify the live
+# hermes-gateway.service. To apply it (after this branch is deployed to
+# /usr/local/lib/hermes-agent, per scripts/systemd/README.md):
+#
+#   mkdir -p /etc/systemd/system/hermes-gateway.service.d
+#   cp scripts/systemd/hermes-gateway-preflight.conf.example \
+#      /etc/systemd/system/hermes-gateway.service.d/preflight.conf
+#   systemctl daemon-reload
+#
+# A failed preflight leaves the gateway stopped (systemd's normal
+# ExecStartPre failure handling) rather than silently starting against a
+# database that requires operator-run recovery.
+
+[Service]
+ExecStartPre=/usr/local/lib/hermes-agent/venv/bin/python3 -m hermes_cli.main db preflight

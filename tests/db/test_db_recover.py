@@ -5,6 +5,7 @@ Covers spec sections D (FTS rebuild) and H (atomic recovery).
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
@@ -122,6 +123,49 @@ class RecoverStateDbTests(unittest.TestCase):
             with mock.patch.object(dbr, "_write_recovery_report") as wm:
                 report = dbr.recover_state_db(db, strategy=0, reason="log-test")
                 wm.assert_called_once()
+
+    def test_strategy_1_install_writes_family_audit_trail(self):
+        # PR5: every DB-family unlink/rename Hermes performs must be
+        # audited with PID + operation + inode, next to state.db.
+        with tempfile.TemporaryDirectory() as td:
+            db = _make_db_with_fts(Path(td))
+            old_inode = db.stat().st_ino
+            report = dbr.recover_state_db(db, strategy=1,
+                                          reason="audit-trail-test",
+                                          holder_wait_timeout=2.0)
+            self.assertEqual(report["status"], "SUCCESS")
+            audit_log = Path(td) / "state.db.family-audit.jsonl"
+            self.assertTrue(audit_log.exists())
+            records = [json.loads(line) for line in
+                      audit_log.read_text().splitlines() if line.strip()]
+            install_records = [r for r in records
+                               if r["operation"] == "install_replace_main_db"]
+            self.assertEqual(len(install_records), 1)
+            rec = install_records[0]
+            self.assertEqual(rec["pid"], os.getpid())
+            self.assertEqual(rec["inode"], old_inode)
+            self.assertEqual(rec["new_inode"], report["install"]["inode"])
+            self.assertNotIn("content", json.dumps(rec))
+
+
+class QuarantineAuditTests(unittest.TestCase):
+    def test_quarantine_writes_family_audit_trail(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = _make_db_with_fts(Path(td))
+            main_inode = db.stat().st_ino
+            dest = dbr._quarantine(db, suffix="test-quarantine")
+            self.assertTrue(dest.exists())
+            self.assertFalse(db.exists())
+            audit_log = Path(td) / "state.db.family-audit.jsonl"
+            self.assertTrue(audit_log.exists())
+            records = [json.loads(line) for line in
+                      audit_log.read_text().splitlines() if line.strip()]
+            main_records = [r for r in records if r["path"] == str(db)]
+            self.assertEqual(len(main_records), 1)
+            self.assertEqual(main_records[0]["operation"], "quarantine_rename")
+            self.assertEqual(main_records[0]["inode"], main_inode)
+            self.assertEqual(main_records[0]["dest"], str(dest))
+            self.assertEqual(main_records[0]["pid"], os.getpid())
 
 
 class _ImportMock:

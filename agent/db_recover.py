@@ -242,8 +242,15 @@ def _quarantine(state_db_path: Path, suffix: Optional[str] = None) -> Path:
     for ext in ("-wal", "-shm"):
         side = state_db_path.with_suffix(state_db_path.suffix + ext)
         if side.exists():
-            shutil.move(str(side), str(side) + f".{suffix}")
+            side_inode = side.stat().st_ino
+            side_dest = str(side) + f".{suffix}"
+            shutil.move(str(side), side_dest)
+            dbm.audit_family_op("quarantine_rename", side, state_db_path=state_db_path,
+                                inode=side_inode, extra={"dest": side_dest})
+    main_inode = state_db_path.stat().st_ino
     shutil.move(str(state_db_path), str(dest))
+    dbm.audit_family_op("quarantine_rename", state_db_path, state_db_path=state_db_path,
+                        inode=main_inode, extra={"dest": str(dest)})
     return dest
 
 

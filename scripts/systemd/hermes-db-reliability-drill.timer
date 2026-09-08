@@ -1,0 +1,18 @@
+# Ticks hermes-db-reliability-drill.service daily. A verified backup that
+# was never actually restored is an unproven claim — PLAN.md PR3
+# acceptance requires "a restore drill must exercise session/routing
+# reads plus isolated append/readback", not just archive validation.
+
+[Unit]
+Description=Hermes state-db restore drill timer (daily)
+Documentation=https://hermes-agent.nousresearch.com/docs
+
+[Timer]
+OnBootSec=20min
+OnUnitActiveSec=1d
+Persistent=true
+AccuracySec=30min
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target

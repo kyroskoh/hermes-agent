@@ -1,0 +1,17 @@
+# Ticks hermes-db-reliability-check.service every 5 minutes, per PLAN.md
+# PR3 target: "detection within 5 minutes". Persistent=true so a check
+# missed while the host was down still fires once at boot instead of
+# silently waiting for the next 5-minute boundary.
+
+[Unit]
+Description=Hermes state-db reliability check timer (every 5 minutes)
+Documentation=https://hermes-agent.nousresearch.com/docs
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+AccuracySec=30sec
+
+[Install]
+WantedBy=timers.target

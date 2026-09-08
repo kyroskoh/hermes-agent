@@ -410,6 +410,56 @@ def fsync_dir(path: os.PathLike) -> None:
         os.close(fd)
 
 
+def audit_family_op(operation: str, path: os.PathLike, *,
+                    state_db_path: Optional[os.PathLike] = None,
+                    inode: Optional[int] = None,
+                    extra: Optional[dict] = None) -> None:
+    """Append a structured audit record for a database-family unlink,
+    rename, or mode-change Hermes itself performs.
+
+    Every operation that removes, renames, or replaces a member of the
+    state.db family (state.db, -wal, -shm, -journal, or a quarantined
+    copy) MUST call this — PID, operation, and inode only, never message
+    contents or secrets (PLAN.md PR5). ``inode`` should be captured by the
+    caller BEFORE a destructive rename/unlink where possible, since the
+    path's identity changes or disappears after the operation; pass it
+    explicitly when the caller already has it, otherwise this best-effort
+    stats ``path`` itself (useful for post-op confirmation, e.g. the newly
+    installed file).
+
+    The record is written next to ``state_db_path`` (default: ``path``'s
+    parent) as ``state.db.family-audit.jsonl`` — an append-only log an
+    operator or the watchdog can tail. Never raises: an audit write must
+    not be able to block or fail the operation it is documenting.
+    """
+    p = Path(path)
+    if inode is None:
+        try:
+            inode = p.stat().st_ino
+        except OSError:
+            inode = None
+    record: dict = {
+        "ts": time.time(),
+        "pid": os.getpid(),
+        "tid": threading.get_ident(),
+        "operation": operation,
+        "path": str(p),
+        "inode": inode,
+    }
+    if extra:
+        record.update(extra)
+    logger.warning("DB_FAMILY_AUDIT %s", json.dumps(record, sort_keys=True))
+    try:
+        base_dir = Path(state_db_path).expanduser().resolve().parent if state_db_path else p.parent
+        log_path = base_dir / "state.db.family-audit.jsonl"
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError:
+        pass
+
+
 def install_state_db_recovered(state_db_path: os.PathLike,
                                recovered_db_path: os.PathLike,
                                *,
@@ -495,7 +545,12 @@ def install_state_db_recovered(state_db_path: os.PathLike,
     # New openers are excluded by the lifetime admission lease throughout.
     for member in family[1:]:
         if member.exists():
+            member_inode = member.stat().st_ino
             os.replace(member, preserve / (member.name + ".removed"))
+            audit_family_op("sidecar_remove_from_live", member,
+                            state_db_path=state_db_path, inode=member_inode,
+                            extra={"recovery_id": reason, "preserved_as": str(preserve / (member.name + ".removed"))})
+    old_main_inode = state_db_path.stat().st_ino if state_db_path.exists() else None
     try:
         os.replace(stage, state_db_path)
         fsync_dir(state_db_path.parent)
@@ -507,7 +562,14 @@ def install_state_db_recovered(state_db_path: os.PathLike,
                 saved = preserve / (member.name + ".removed")
                 if saved.exists():
                     os.replace(saved, member)
+                    audit_family_op("sidecar_restore_after_failed_install", member,
+                                    state_db_path=state_db_path,
+                                    extra={"recovery_id": reason})
         raise
+    audit_family_op("install_replace_main_db", state_db_path,
+                    state_db_path=state_db_path, inode=old_main_inode,
+                    extra={"recovery_id": reason, "new_inode": state_db_path.stat().st_ino,
+                           "predecessor": str(preserve)})
     report["predecessor"] = str(preserve)
     logger.warning("DB_INSTALL pid=%s path=%s predecessor=%s", os.getpid(), state_db_path, preserve)
 
@@ -958,6 +1020,9 @@ __all__ = [
     "wait_for_no_holders",
     "install_state_db_recovered",
     "fsync_dir",
+    "audit_family_op",
+    "require_maintenance",
+    "held_by_current_thread",
     "ArchiveStatus",
     "ArchiveValidationError",
     "validate_archive_candidate",
