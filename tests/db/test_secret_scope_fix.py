@@ -10,7 +10,6 @@ import sys
 import unittest
 from unittest import mock
 
-sys.path.insert(0, "/usr/local/lib/hermes-agent")
 
 # These tests exercise ``tools/registry.py`` which depends on the full
 # Hermes stack. Import order matters because some modules cache state at

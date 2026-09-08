@@ -20,7 +20,6 @@ import time
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, "/usr/local/lib/hermes-agent")
 
 from agent import db_maintenance as dbm
 
@@ -88,7 +87,7 @@ class MaintenanceLockTests(unittest.TestCase):
                 )
             self.assertEqual(report["status"], "SUCCESS")
             self.assertTrue(db.exists())
-            self.assertFalse(recovered.exists(), "recovered should have been renamed")
+            self.assertTrue(recovered.exists(), "candidate remains available for independent verification")
             c = sqlite3.connect(str(db))
             rows = c.execute("SELECT id, content FROM messages ORDER BY id").fetchall()
             self.assertEqual(rows, [(1, "hello-recovered"), (2, "extra")])

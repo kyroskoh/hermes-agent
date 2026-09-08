@@ -20466,6 +20466,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return source
 
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
+        from agent.pending_messages import guarded_agent_turn
+        return await guarded_agent_turn(self, event, source, _quick_key, run_generation,
+                                        self._handle_message_with_agent_persisted)
+
+    async def _handle_message_with_agent_persisted(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
@@ -33220,6 +33225,13 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     try:
         from gateway.shutdown_flush import recover_pending_to_db
         recovered = recover_pending_to_db()
+        from agent.pending_messages import replay_queued_inbound
+        async def _storage_inbox_replay_loop():
+            from hermes_constants import get_hermes_home
+            while True:
+                await asyncio.sleep(60)
+                await replay_queued_inbound(runner, get_hermes_home())
+        runner._storage_inbox_replay_task = asyncio.create_task(_storage_inbox_replay_loop())
         if recovered:
             logger.info(
                 "Recovered %d pending message(s) from shutdown flush", recovered,

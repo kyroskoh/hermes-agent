@@ -1353,7 +1353,8 @@ def _make_progress_runner(monkeypatch, tmp_path, agent_cls, cfg_text):
 # Cooldown persistence across gateway restarts (#74136)
 # ---------------------------------------------------------------------------
 
-def _make_cooldown_runner(monkeypatch, tmp_path, agent_cls, session_db, session_id):
+def _make_cooldown_runner(monkeypatch, tmp_path, agent_cls, session_db, session_id,
+                           message_id="1"):
     """Scaffolding for the restart-persistence tests: a fresh GatewayRunner
     wired to a REAL AsyncSessionDB facade (not a MagicMock) so the hygiene
     cooldown check/write paths exercise the actual SQLite-backed methods."""
@@ -1433,7 +1434,7 @@ def _make_cooldown_runner(monkeypatch, tmp_path, agent_cls, session_db, session_
             chat_type="dm",
             user_id="12345",
         ),
-        message_id="1",
+        message_id=message_id,
     )
     return runner, adapter, event
 
@@ -1529,7 +1530,8 @@ async def test_hygiene_compression_cooldown_survives_gateway_restart(
                 return (messages, None)
 
         runner2, _adapter2, event2 = _make_cooldown_runner(
-            monkeypatch, tmp_path, ShouldNotRunAgent, db, session_id
+            monkeypatch, tmp_path, ShouldNotRunAgent, db, session_id,
+            message_id="2",  # a distinct inbound message, not a replay of event1
         )
         assert await runner2._handle_message(event2) == "ok"
         assert ShouldNotRunAgent.instances == 0, (
@@ -1545,7 +1547,8 @@ async def test_hygiene_compression_cooldown_survives_gateway_restart(
         # restart must use rung 2 (900s), not start over at 300s (#86650).
         db.clear_compression_failure_cooldown(session_id)
         runner3, _adapter3, event3 = _make_cooldown_runner(
-            monkeypatch, tmp_path, AbortingCompressAgent, db, session_id
+            monkeypatch, tmp_path, AbortingCompressAgent, db, session_id,
+            message_id="3",  # a distinct inbound message, not a replay of event1/event2
         )
         assert await runner3._handle_message(event3) == "ok"
         assert AbortingCompressAgent.instances == 2
@@ -1633,7 +1636,8 @@ async def test_hygiene_fence_cancel_records_cooldown_without_abort_flag(
                 return (messages, None)
 
         runner2, _adapter2, event2 = _make_cooldown_runner(
-            monkeypatch, tmp_path, ShouldNotRunAgent, db, session_id
+            monkeypatch, tmp_path, ShouldNotRunAgent, db, session_id,
+            message_id="2",  # a distinct inbound message, not a replay of event1
         )
         assert await runner2._handle_message(event2) == "ok"
         assert ShouldNotRunAgent.instances == 0, (

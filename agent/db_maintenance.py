@@ -41,6 +41,10 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
+import threading
+import sqlite3
+import uuid
 import time
 from pathlib import Path
 from typing import Iterator, Optional
@@ -52,6 +56,8 @@ logger = logging.getLogger(__name__)
 # inspect /root/.hermes/state.db.maintenance.lock and see who holds it.
 _LOCK_MAGIC = b"HERMES-MAINT-V1\n"
 _HOLDER_LINE_MAX = 256
+_HELD_EXCLUSIVE = {}
+_HELD_EXCLUSIVE_GUARD = threading.Lock()
 
 
 class MaintenanceActive(RuntimeError):
@@ -200,6 +206,8 @@ class MaintenanceLock:
             if acquired:
                 self._held = True
                 self._fd = fd
+                with _HELD_EXCLUSIVE_GUARD:
+                    _HELD_EXCLUSIVE[(os.getpid(), threading.get_ident(), str(self.state_db_path))] = self
                 try:
                     write_holder_metadata(
                         self.lock_path,
@@ -229,6 +237,8 @@ class MaintenanceLock:
                 "maintenance lock released: reason=%r recovery_id=%r",
                 self.reason, self.recovery_id,
             )
+            with _HELD_EXCLUSIVE_GUARD:
+                _HELD_EXCLUSIVE.pop((os.getpid(), threading.get_ident(), str(self.state_db_path)), None)
             _release_flock(self._fd)
             self._fd = -1
             self._held = False
@@ -253,10 +263,6 @@ def assert_writer_safe(state_db_path: os.PathLike, *,
     state_db_path = Path(state_db_path).expanduser().resolve()
     lock_path = maintenance_lock_path(state_db_path)
     deadline = time.monotonic() + timeout
-    if not lock_path.exists():
-        # No maintenance ever recorded — fast path.
-        yield
-        return
     while True:
         acquired, fd = _acquire_flock(lock_path, exclusive=False)
         if acquired:
@@ -277,83 +283,83 @@ def assert_writer_safe(state_db_path: os.PathLike, *,
         time.sleep(poll_interval)
 
 
-def state_db_holders(state_db_path: os.PathLike,
-                     *,
-                     include_wal: bool = True) -> list[dict]:
-    """Return the list of processes holding state.db (and optionally the
-    WAL/SHM sidecars).
+def require_maintenance(state_db_path):
+    key = (os.getpid(), threading.get_ident(), str(Path(state_db_path).resolve()))
+    with _HELD_EXCLUSIVE_GUARD:
+        lease = _HELD_EXCLUSIVE.get(key)
+        if lease is None or not lease._held:
+            raise MaintenanceActive("An exclusive maintenance lease held by this thread is required")
+    return lease
 
-    Uses two complementary mechanisms:
 
-    1. ``fuser`` — Linux procps tool, fast, but unreliable for SQLite
-       because the database may be held via a memfd or journal temp file
-       that ``fuser`` cannot see.
-    2. A probe connection that runs ``BEGIN IMMEDIATE`` with a short
-       timeout. If SQLite raises ``OperationalError('database is locked')``
-       another writer holds the DB; if it succeeds and rolls back, no
-       writer is present. This is the authoritative detector for SQLite
-       specifically.
+def held_by_current_thread(state_db_path) -> bool:
+    """Non-raising check: does this thread already hold the exclusive
+    maintenance lease for ``state_db_path``?
 
-    Returns a list of dicts suitable for log/dashboard display. Each entry
-    is either an fuser-detected holder ``{"pid": int, "user": str,
-    "command": str}`` or a probe-conflict ``{"source": "sqlite_probe",
-    "conflict": True, "locked_error": str}``.
+    For callers like ``repair_fts``/``recover_state_db`` that may run either
+    inside their own ``MaintenanceLock`` or standalone (e.g. CLI ``--no-lock``
+    escape hatches): use this to decide whether to pass
+    ``trust_maintenance_lock=True`` to nested reader/writer opens, instead of
+    hardcoding trust and accidentally exempting an unrelated caller.
     """
-    state_db_path = Path(state_db_path).expanduser().resolve()
-    holders: list[dict] = []
-    if shutil.which("fuser"):
-        paths = [str(state_db_path)]
-        if include_wal:
-            paths.append(str(state_db_path) + "-wal")
-            paths.append(str(state_db_path) + "-shm")
-        try:
-            proc = subprocess.run(
-                ["fuser", "--no-mtab", "-v", "-n", "file"] + paths,
-                capture_output=True, text=True, timeout=5,
-            )
-        except subprocess.TimeoutExpired:
-            pass
-        except Exception:
-            pass
-        else:
-            for line in (proc.stdout or "").splitlines():
-                line = line.strip()
-                if ":" not in line or not any(ch.isdigit() for ch in line):
-                    continue
-                try:
-                    parts = line.split()
-                    pid = int(next(p for p in parts if p.isdigit()))
-                    user = parts[0] if len(parts) >= 4 else "?"
-                    cmd = " ".join(parts[3:]) if len(parts) >= 4 else ""
-                    holders.append({"pid": pid, "user": user, "command": cmd})
-                except (StopIteration, ValueError):
-                    continue
+    key = (os.getpid(), threading.get_ident(), str(Path(state_db_path).expanduser().resolve()))
+    with _HELD_EXCLUSIVE_GUARD:
+        lease = _HELD_EXCLUSIVE.get(key)
+        return lease is not None and lease._held
 
-    # SQLite writer probe — authoritative for in-process and same-host
-    # writers. Uses the venv python's bundled sqlite (3.53.1) which is
-    # what Hermes uses for everything else.
-    probe_path = str(state_db_path)
-    if os.path.exists(probe_path):
+
+def state_db_holders(state_db_path: os.PathLike, *, include_wal: bool = True) -> list[dict]:
+    """Observe file handles without opening SQLite or acquiring its write locks.
+
+    Include idle and deleted handles; transaction availability is not quiescence.
+    Uninspectable relevant processes make installation fail closed.
+    """
+    p = Path(state_db_path).expanduser().resolve()
+    paths = {str(p)}
+    if include_wal:
+        paths.update(str(p) + ext for ext in ("-wal", "-shm", "-journal"))
+    identities = set()
+    for name in paths:
         try:
-            import sqlite3
-            probe = sqlite3.connect(probe_path, timeout=0.5)
+            st = os.stat(name)
+            identities.add((st.st_dev, st.st_ino))
+        except FileNotFoundError:
+            pass
+    result = []
+    if not sys.platform.startswith("linux"):
+        return [{"source": "holder_scan", "detector_error": "Offline handle verification is only implemented on Linux"}]
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            fds = list((proc / "fd").iterdir())
+        except FileNotFoundError:
+            continue
+        except PermissionError:
             try:
-                probe.execute("BEGIN IMMEDIATE")
-                probe.rollback()
-            except sqlite3.OperationalError as e:
-                if "locked" in str(e).lower():
-                    holders.append({
-                        "source": "sqlite_probe",
-                        "conflict": True,
-                        "locked_error": str(e),
-                    })
-            finally:
-                probe.close()
-        except Exception as e:
-            holders.append({"source": "sqlite_probe", "detector_error": str(e)})
-
-    holders.sort(key=lambda h: h.get("pid", 0))
-    return holders
+                cmd = (proc / "cmdline").read_bytes().lower()
+            except FileNotFoundError:
+                continue
+            except PermissionError:
+                cmd = b"hermes"  # unknown processes cannot prove safety
+            if any(word in cmd for word in (b"hermes", b"python", b"sqlite")):
+                result.append({"pid": int(proc.name), "detector_error": "Cannot inspect relevant process file handles"})
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(fd)
+                st = fd.stat()
+            except FileNotFoundError:
+                continue
+            except PermissionError:
+                result.append({"pid": int(proc.name), "detector_error": "Cannot inspect file handle"})
+                continue
+            clean = target.removesuffix(" (deleted)")
+            if clean in paths or (st.st_dev, st.st_ino) in identities:
+                result.append({"pid": int(proc.name), "fd": fd.name, "target": clean,
+                               "deleted": target.endswith(" (deleted)"),
+                               "device": st.st_dev, "inode": st.st_ino})
+    return result
 
 
 def wait_for_no_holders(state_db_path: os.PathLike, *,
@@ -370,14 +376,8 @@ def wait_for_no_holders(state_db_path: os.PathLike, *,
     last_holders: list[dict] = []
     while True:
         holders = state_db_holders(state_db_path, include_wal=True)
-        # Filter out shell PIDs whose cmd line is "fuser" itself (false
-        # positive). Probe conflicts ({'conflict': True}) are real holders.
-        # Detector errors ({'detector_error': ...}) do NOT count — they're
-        # diagnostic only, the holder check still failed.
-        real = [h for h in holders
-                if "fuser" not in h.get("command", "").lower()
-                and not h.get("detector_error")
-                and (h.get("conflict") or h.get("pid") is not None)]
+        real = [h for h in holders if h.get("pid") is not None
+                or h.get("conflict") or h.get("detector_error")]
         if not real:
             if last_holders:
                 logger.info("all holders released: previously %s",
@@ -439,16 +439,7 @@ def install_state_db_recovered(state_db_path: os.PathLike,
     if not recovered_db_path.exists():
         raise FileNotFoundError(f"recovered DB not found: {recovered_db_path}")
 
-    # The caller is expected to be inside a MaintenanceLock. We do not
-    # re-acquire here because that would deadlock the lock acquisition; we
-    # only verify the lock file's presence as a sanity check.
-    lock_path = maintenance_lock_path(state_db_path)
-    if not lock_path.exists():
-        logger.warning(
-            "install_state_db_recovered called without a maintenance lock "
-            "for %s — proceeding but the caller is expected to hold the lock",
-            state_db_path,
-        )
+    require_maintenance(state_db_path)
 
     wait_for_no_holders(
         state_db_path,
@@ -469,14 +460,56 @@ def install_state_db_recovered(state_db_path: os.PathLike,
         report["status"] = "DRY_RUN"
         return report
 
-    # fsync the recovered file before rename.
-    with open(recovered_db_path, "r+b") as fh:
+    # Only install a self-contained candidate: no live holders or hot journals.
+    if recovered_db_path == state_db_path:
+        raise ValueError("Candidate must differ from the live database")
+    wait_for_no_holders(recovered_db_path, timeout=0)
+    for ext in ("-wal", "-shm", "-journal"):
+        side = Path(str(recovered_db_path) + ext)
+        if side.exists() and side.stat().st_size:
+            raise ValueError(f"Candidate has a sidecar: {side}")
+    with contextlib.closing(sqlite3.connect(recovered_db_path.as_uri() + "?mode=ro", uri=True)) as c:
+        if c.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+            raise ValueError("Candidate integrity check failed")
+        if c.execute("PRAGMA foreign_key_check").fetchall():
+            raise ValueError("Candidate foreign keys failed")
+        for table in ("sessions", "messages"):
+            c.execute(f'SELECT count(*) FROM "{table}"').fetchone()
+    token = uuid.uuid4().hex
+    preserve = state_db_path.parent / ("pre-install-" + token)
+    preserve.mkdir(mode=0o700)
+    stage = state_db_path.parent / (".state-install-" + token)
+    shutil.copy2(recovered_db_path, stage)
+    with open(stage, "rb") as fh:
         os.fsync(fh.fileno())
-
-    # Atomic rename.
-    os.replace(recovered_db_path, state_db_path)
-    # fsync the parent so the rename is durable.
-    fsync_dir(state_db_path.parent)
+    wait_for_no_holders(state_db_path, timeout=0)
+    # Preserve the complete old family before modifying any live name.
+    family = [state_db_path] + [Path(str(state_db_path) + e) for e in ("-wal", "-shm", "-journal")]
+    for member in family:
+        if member.exists():
+            shutil.copy2(member, preserve / member.name)
+            with open(preserve / member.name, "rb") as fh:
+                os.fsync(fh.fileno())
+    fsync_dir(preserve)
+    fsync_dir(preserve.parent)
+    # New openers are excluded by the lifetime admission lease throughout.
+    for member in family[1:]:
+        if member.exists():
+            os.replace(member, preserve / (member.name + ".removed"))
+    try:
+        os.replace(stage, state_db_path)
+        fsync_dir(state_db_path.parent)
+    except BaseException:
+        # If rename failed, put predecessor sidecars back. If rename succeeded
+        # but fsync failed, leave the full preserved family and report failure.
+        if stage.exists():
+            for member in family[1:]:
+                saved = preserve / (member.name + ".removed")
+                if saved.exists():
+                    os.replace(saved, member)
+        raise
+    report["predecessor"] = str(preserve)
+    logger.warning("DB_INSTALL pid=%s path=%s predecessor=%s", os.getpid(), state_db_path, preserve)
 
     report["status"] = "SUCCESS"
     report["inode"] = state_db_path.stat().st_ino

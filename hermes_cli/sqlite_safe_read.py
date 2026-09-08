@@ -150,6 +150,7 @@ class _TrackingMixin:
     """Untrack-on-close behaviour, mixable into any Connection subclass."""
 
     _hermes_tracked_path: str | None = None
+    _hermes_admission = None
 
     def close(self) -> None:  # type: ignore[misc]
         with _live_lock:
@@ -162,6 +163,10 @@ class _TrackingMixin:
             if path is not None:
                 self._hermes_tracked_path = None
                 untrack_connection(path)
+            admission = getattr(self, "_hermes_admission", None)
+            if admission is not None:
+                self._hermes_admission = None
+                admission.__exit__(None, None, None)
 
 
 class TrackedConnection(_TrackingMixin, sqlite3.Connection):
@@ -212,6 +217,7 @@ def connect_tracked(
     *,
     tracking_path: Path | str | None = None,
     connect_fn=None,
+    maintenance_owned=False,
     **kwargs,
 ) -> sqlite3.Connection:
     """``sqlite3.connect`` that registers the connection for the lifetime of the fd.
@@ -242,8 +248,28 @@ def connect_tracked(
     opener = connect_fn if connect_fn is not None else sqlite3.connect
     kwargs["factory"] = _tracking_factory(kwargs.get("factory", sqlite3.Connection))
 
+    admission = None
+    # Resolve before opening: no gap between maintenance admission and SQLite.
+    import sys
+    from urllib.parse import urlsplit, unquote
+    target = str(tracking_path if tracking_path is not None else path)
+    if target.startswith("file:"):
+        target = unquote(urlsplit(target).path)
+    if sys.platform.startswith("linux") and target not in ("", ":memory:") and "mode=memory" not in str(path):
+        from agent.db_maintenance import assert_writer_safe, require_maintenance
+        if maintenance_owned:
+            require_maintenance(target)
+        else:
+            Path(target).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+            admission = assert_writer_safe(target, timeout=0)
+            admission.__enter__()
     with _live_lock:
-        conn = opener(str(path), **kwargs)
+        try:
+            conn = opener(str(path), **kwargs)
+        except BaseException:
+            if admission is not None:
+                admission.__exit__(None, None, None)
+            raise
         try:
             resolved = (
                 _key(tracking_path)
@@ -260,6 +286,7 @@ def connect_tracked(
                 # releases the registry entry, rather than handing back a
                 # connection whose database has silently lost probe safety.
                 conn = _retrofit_tracking(conn, resolved)
+            conn._hermes_admission = admission
             conn._hermes_tracked_path = resolved
             _live_connections[resolved] = _live_connections.get(resolved, 0) + 1
             return conn
@@ -270,6 +297,8 @@ def connect_tracked(
                 sqlite3.Connection.close(conn)
             except Exception:
                 pass
+            if admission is not None:
+                admission.__exit__(None, None, None)
             raise
 
 

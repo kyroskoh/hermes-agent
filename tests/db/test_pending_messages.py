@@ -13,7 +13,6 @@ import time
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, "/usr/local/lib/hermes-agent")
 
 from agent import pending_messages as pm
 

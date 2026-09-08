@@ -50,7 +50,6 @@ _READER_LOCK = threading.RLock()
 # journal_mode=WAL (good), but foreign_keys=0 (bad — the cause of 99 live
 # orphan rows) and temp_store=0 (default; benign but more disk churn).
 DEFAULT_PRAGMAS = (
-    ("journal_mode", "WAL"),
     ("synchronous", "FULL"),
     ("foreign_keys", "ON"),
     ("busy_timeout", "5000"),
@@ -149,18 +148,11 @@ class ManagedConnection:
 
 def _apply_default_pragmas(conn: sqlite3.Connection) -> None:
     """Apply the hardened PRAGMA set in order. Idempotent."""
-    cur = conn.cursor()
-    try:
-        for pragma, value in DEFAULT_PRAGMAS:
-            try:
-                cur.execute(f"PRAGMA {pragma}={value}")
-            except sqlite3.OperationalError as e:
-                logger.warning(
-                    "PRAGMA %s=%s failed: %s (continuing)",
-                    pragma, value, e,
-                )
-    finally:
-        cur.close()
+    for pragma, value in DEFAULT_PRAGMAS:
+        conn.execute(f"PRAGMA {pragma}={value}")
+    for pragma, expected in (("foreign_keys", 1), ("synchronous", 2)):
+        if conn.execute(f"PRAGMA {pragma}").fetchone()[0] != expected:
+            raise sqlite3.OperationalError(f"Required PRAGMA {pragma} was not applied")
 
 
 def open_sqlite(path: os.PathLike, *,
@@ -217,16 +209,20 @@ def open_sqlite(path: os.PathLike, *,
             if not trust_maintenance_lock:
                 _assert_writer_safe_or_raise(p)
 
-    # Open.
-    conn = sqlite3.connect(
-        str(p),
-        timeout=timeout,
-        isolation_level=isolation_level,
-        check_same_thread=check_same_thread,
+    from hermes_cli.sqlite_safe_read import connect_tracked
+    conn = connect_tracked(
+        p.as_uri() + "?mode=ro" if role == "reader" else str(p),
+        tracking_path=p, uri=role == "reader", maintenance_owned=trust_maintenance_lock,
+        timeout=timeout, isolation_level=isolation_level, check_same_thread=check_same_thread,
     )
-
-    if apply_pragmas:
-        _apply_default_pragmas(conn)
+    try:
+        if apply_pragmas and role == "writer":
+            _apply_default_pragmas(conn)
+        if role == "reader":
+            conn.execute("PRAGMA query_only=ON")
+    except BaseException:
+        conn.close()
+        raise
 
     mc = ManagedConnection(conn, p, role)
 
@@ -248,14 +244,19 @@ def open_sqlite(path: os.PathLike, *,
 # Health-check primitives
 # ──────────────────────────────────────────────────────────────────────
 
-def quick_check(path: os.PathLike) -> tuple[bool, str]:
+def quick_check(path: os.PathLike, *,
+                trust_maintenance_lock: bool = False) -> tuple[bool, str]:
     """Run ``PRAGMA quick_check(1)`` — the cheap gate.
 
     Returns (ok, detail). ok=True iff the result is exactly ``"ok"``. detail
     is the raw first row otherwise so the caller can log/display it.
+
+    trust_maintenance_lock: pass True only when the caller already holds
+    the exclusive MaintenanceLock in this thread.
     """
     p = Path(path).expanduser().resolve()
-    with open_sqlite(p, role="reader", apply_pragmas=False) as mc:
+    with open_sqlite(p, role="reader", apply_pragmas=False,
+                      trust_maintenance_lock=trust_maintenance_lock) as mc:
         try:
             row = mc.raw.execute("PRAGMA quick_check(1)").fetchone()
         except sqlite3.DatabaseError as e:
@@ -266,15 +267,20 @@ def quick_check(path: os.PathLike) -> tuple[bool, str]:
     return (val == "ok"), str(val)
 
 
-def integrity_check(path: os.PathLike, *, full: bool = True) -> tuple[bool, list[str]]:
+def integrity_check(path: os.PathLike, *, full: bool = True,
+                    trust_maintenance_lock: bool = False) -> tuple[bool, list[str]]:
     """Run ``PRAGMA integrity_check`` (full) or ``PRAGMA integrity_check(1)`` (fast).
 
     Returns (ok, rows). ok=True iff every row reads ``"ok"``. rows is the
     raw list of strings the pragma returned, useful for the dashboard card.
+
+    trust_maintenance_lock: pass True only when the caller already holds
+    the exclusive MaintenanceLock in this thread.
     """
     p = Path(path).expanduser().resolve()
     pragma = "PRAGMA integrity_check" if full else "PRAGMA integrity_check(1)"
-    with open_sqlite(p, role="reader", apply_pragmas=False) as mc:
+    with open_sqlite(p, role="reader", apply_pragmas=False,
+                      trust_maintenance_lock=trust_maintenance_lock) as mc:
         try:
             rows = [r[0] for r in mc.raw.execute(pragma).fetchall()]
         except sqlite3.DatabaseError as e:
@@ -330,44 +336,58 @@ def wal_checkpoint(path: os.PathLike, mode: str = "TRUNCATE") -> dict:
             "checkpointed": row[2]}
 
 
-def vacuum_into(path: os.PathLike, dest_path: os.PathLike) -> dict:
+def vacuum_into(path: os.PathLike, dest_path: os.PathLike, *,
+                 trust_maintenance_lock: bool = False) -> dict:
     """Run ``VACUUM INTO <dest>`` to produce a clean, defragmented snapshot.
 
     VACUUM INTO acquires a brief read lock on the source; it is safe to
     run while the gateway is writing, but it is slower than
     ``Connection.backup()`` for a 235MB WAL DB. Both are valid; this one
     is used by the watchdog / doctor because it is a single SQL statement.
+
+    trust_maintenance_lock: pass True only when the caller already holds
+    the exclusive MaintenanceLock in this thread (e.g. during recovery).
+    Re-acquiring the shared admission lock in that case would deadlock
+    against the caller's own exclusive hold.
     """
     p = Path(path).expanduser().resolve()
     d = Path(dest_path).expanduser().resolve()
     d.parent.mkdir(parents=True, exist_ok=True)
     # If dest exists, VACUUM INTO refuses; remove first.
     if d.exists():
-        d.unlink()
-    with open_sqlite(p, role="reader", apply_pragmas=False) as mc:
+        raise FileExistsError(d)
+    with open_sqlite(p, role="reader", apply_pragmas=False,
+                      trust_maintenance_lock=trust_maintenance_lock) as mc:
         try:
-            mc.raw.execute(f"VACUUM INTO {str(d)!r}")
+            with contextlib.closing(sqlite3.connect(d)) as target:
+                mc.raw.backup(target)
         except sqlite3.OperationalError as e:
             return {"ok": False, "error": str(e)}
     return {"ok": True, "size": d.stat().st_size}
 
 
-def fts_integrity_check(path: os.PathLike,
-                         *, fts_names: Optional[list[str]] = None) -> dict:
-    """Probe each FTS5 virtual table for (a) existence in sqlite_master,
-    (b) ability to be queried, (c) ability to run the ``integrity-check``
-    command.
+def fts_integrity_check(path: os.PathLike, *, fts_names: Optional[list[str]] = None,
+                         trust_maintenance_lock: bool = False) -> dict:
+    """Probe each FTS5 virtual table for (a) existence in sqlite_master and
+    (b) ability to be queried.
 
-    Does NOT mutate the database; the 'integrity-check' command is read-only
-    on FTS5 vtables. For trigram vtables the row-count check is skipped
-    because they intentionally cover a subset of the source.
+    Does NOT mutate the database and does not run write-based diagnostics
+    (e.g. the FTS5 'integrity-check' insert command) against a live
+    database. Deep FTS integrity must run against a consistent copy;
+    ``entry["integrity"]`` is always ``None`` here — it is not a pass/fail
+    signal on this path. For trigram vtables the row-count check is
+    skipped because they intentionally cover a subset of the source.
 
     If ``fts_names`` is provided, missing tables are still reported (with
     ``exists=False``) so the classifier can flag them. When ``fts_names``
     is None, only the vtables currently in ``sqlite_master`` are reported.
+
+    trust_maintenance_lock: pass True only when the caller already holds
+    the exclusive MaintenanceLock in this thread.
     """
     p = Path(path).expanduser().resolve()
-    with open_sqlite(p, role="reader", apply_pragmas=False) as mc:
+    with open_sqlite(p, role="reader", apply_pragmas=False,
+                      trust_maintenance_lock=trust_maintenance_lock) as mc:
         result: dict[str, dict] = {}
         if fts_names is None:
             fts_names = [
@@ -391,23 +411,15 @@ def fts_integrity_check(path: os.PathLike,
                     continue
                 # Query-ability probe.
                 try:
-                    cnt = mc.raw.execute(f"SELECT count(*) FROM {name}").fetchone()
+                    cnt = mc.raw.execute('SELECT count(*) FROM "' + name.replace('"', '""') + '"').fetchone()
                     entry["queryable"] = True
                     entry["count"] = cnt[0] if cnt else 0
                 except sqlite3.DatabaseError as e:
                     entry["queryable"] = False
                     entry["error"] = f"SELECT count(*) raised: {e}"
-                # Integrity-check command (FTS5-specific).
-                try:
-                    ic = mc.raw.execute(
-                        f"INSERT INTO {name}({name}) VALUES('integrity-check')"
-                    )
-                    # INSERT returns no rows; on failure, FTS5 raises.
-                    entry["integrity"] = "ok"
-                except sqlite3.OperationalError as e:
-                    entry["integrity"] = f"failed: {e}"
-                except sqlite3.DatabaseError as e:
-                    entry["integrity"] = f"failed: {e}"
+                # Deep FTS integrity uses write commands and must run on a
+                # consistent copy. Live observation only checks queryability.
+                entry["integrity"] = None
             except sqlite3.DatabaseError as e:
                 entry["error"] = str(e)
             result[name] = entry
@@ -420,8 +432,13 @@ def db_header_bytes(path: os.PathLike, n: int = 16) -> bytes:
     SQLite magic string).
     """
     p = Path(path).expanduser().resolve()
-    with open(p, "rb") as fh:
-        return fh.read(n)
+    # Raw open/close in a process with SQLite connections can cancel POSIX
+    # locks. Run the forensic header read in a separate process.
+    import subprocess, sys
+    return subprocess.check_output([sys.executable, "-c",
+        "import sys; f=open(sys.argv[1],'rb'); sys.stdout.buffer.write(f.read(int(sys.argv[2]))); f.close()",
+        str(p), str(n)], timeout=5)
+
 
 
 __all__ = [

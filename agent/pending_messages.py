@@ -237,3 +237,161 @@ __all__ = [
     "list_pending",
     "replay_pending",
 ]
+
+# Gateway ingress uses the same atomic queue primitives in an isolated
+# subdirectory. Generic shutdown transcript files must not be replayed as turns.
+@__import__('contextlib').contextmanager
+def _inbox_lock(home):
+    import fcntl
+    d=Path(home)/'pending_messages'/'inbound'
+    d.mkdir(parents=True,exist_ok=True,mode=0o700)
+    with open(d/'.lock','a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        yield d
+
+
+def _durable_json(path,payload):
+    from utils import atomic_json_write
+    atomic_json_write(path,payload,mode=0o600,default=str)
+    fd=os.open(path.parent,os.O_RDONLY)
+    try:os.fsync(fd)
+    finally:os.close(fd)
+
+
+def capture_inbound(home,event,max_pending=1000,max_bytes=64*1024*1024):
+    """Durably capture a new authorized agent turn; dedup within its chat.
+
+    Processing receipts are never replayed automatically: a crash may have
+    happened after an external side effect but before recording completion.
+    """
+    import dataclasses
+    source=event.source
+    mid=event.message_id or getattr(event,'_storage_receipt_id',None) or str(uuid.uuid4())
+    event._storage_receipt_id=mid
+    identity=[str(getattr(source,'platform','')),str(getattr(source,'profile','default')),
+              str(getattr(source,'chat_id','')),str(getattr(source,'thread_id','')),
+              str(getattr(source,'user_id','')),str(mid)]
+    key=hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+    data={}
+    for f in dataclasses.fields(event):
+        value=getattr(event,f.name)
+        if f.name=='raw_message':continue
+        if f.name=='source':value=source.to_dict()
+        elif hasattr(value,'value'):value=value.value
+        elif hasattr(value,'isoformat'):value=value.isoformat()
+        data[f.name]=value
+    data['message_id']=str(mid)
+    record={'id':key,'state':'queued','received_at':time.time(),'event':data}
+    blob=json.dumps(record,default=str).encode()
+    with _inbox_lock(home) as d:
+        path=d/(key+'.json')
+        if path.exists():return path,json.loads(path.read_text())
+        files=list(d.glob('*.json'))
+        # Completed receipts expire after seven days; unresolved input is retained.
+        for old in files:
+            if old.stat().st_mtime<time.time()-7*86400:
+                payload=json.loads(old.read_text())
+                if payload['state']=='completed':old.unlink()
+        files=list(d.glob('*.json'))
+        if len(files)>=max_pending or sum(p.stat().st_size for p in files)+len(blob)>max_bytes:
+            raise OSError('durable input queue capacity exceeded')
+        _durable_json(path,record)
+        return path,record
+
+
+def set_inbound_state(home,path,state,expected=None):
+    with _inbox_lock(home):
+        payload=json.loads(path.read_text())
+        if expected is not None and payload['state'] not in expected:return False
+        payload['state']=state;payload['updated_at']=time.time()
+        _durable_json(path,payload)
+        return True
+
+
+def storage_readable(db_path):
+    from agent.db_connection import open_sqlite
+    with open_sqlite(db_path,role='reader',timeout=2) as c:
+        if c.raw.execute('pragma quick_check(1)').fetchall()!=[('ok',)]:
+            raise RuntimeError('session storage integrity check failed')
+        c.raw.execute('select * from gateway_routing limit 1').fetchall()
+        c.raw.execute('select id from messages order by id desc limit 1').fetchall()
+
+
+async def guarded_agent_turn(runner,event,source,key,generation,handler):
+    """Durable admission at the authorized new-turn boundary, before DB writes.
+
+    Controls/steering keep their existing bypass paths. Deferred adapter queues
+    still use the existing shutdown spool; this receipt covers turns admitted
+    to the agent and main-database failure, not transport-level exactly-once ACK.
+    """
+    if event.internal:
+        return await handler(event,source,key,generation)
+    import asyncio
+    db=getattr(runner,'_session_db',None)
+    path=getattr(db,'db_path',None)
+    if not isinstance(path,(str,Path)):
+        # No resolvable backing store for this runner (unset, a test fake, or
+        # the handle cache is between retries — see GatewayRunner._session_db).
+        # There is nothing concrete to guard here; guessing a default path
+        # would check the wrong database (or one that was never opened) and
+        # falsely block turns for every caller that legitimately runs without
+        # one. The corruption scenario this guards is a previously-working,
+        # resolvable db_path that goes unreadable mid-flight — handled below.
+        return await handler(event,source,key,generation)
+    home=Path(path).parent
+    try:
+        receipt,record=await asyncio.to_thread(capture_inbound,home,event)
+    except Exception:
+        logger.exception('Durable input capture failed; agent execution refused')
+        return 'Session storage is unavailable and this message could not be saved. Please retry after recovery.'
+    if record['state']=='completed':return None
+    if record['state'] in ('processing','needs_review'):
+        return 'This input has an unfinished saved turn. It needs recovery review before it can safely run again.'
+    try:
+        await asyncio.to_thread(storage_readable,Path(path))
+    except Exception:
+        logger.exception('Session storage unavailable; incoming turn retained in durable queue')
+        return 'Session storage is unavailable. Your message is saved and will be retried after storage recovers.'
+    claimed=await asyncio.to_thread(set_inbound_state,home,receipt,'processing',('queued',))
+    if not claimed:return None
+    try:
+        response=await handler(event,source,key,generation)
+        # Any post-start uncertainty is retained for operator review; do not
+        # automatically repeat model/tool side effects after an interrupted turn.
+        await asyncio.to_thread(storage_readable,Path(path))
+        await asyncio.to_thread(set_inbound_state,home,receipt,'completed' if response else 'needs_review')
+        return response
+    except BaseException:
+        await asyncio.to_thread(set_inbound_state,home,receipt,'needs_review')
+        raise
+
+
+async def replay_queued_inbound(runner,home):
+    """Replay only never-started turns through normal authorization and routing."""
+    import asyncio
+    from gateway.platforms.base import MessageEvent, MessageType
+    from gateway.session import SessionSource
+    from datetime import datetime
+    d=Path(home)/'pending_messages'/'inbound'
+    for path in sorted(d.glob('*.json'))[:100]:
+        try:
+            payload=json.loads(path.read_text())
+            if payload['state']!='queued':continue
+            data=payload['event'];data['source']=SessionSource.from_dict(data['source'])
+            data['message_type']=MessageType(data['message_type'])
+            if isinstance(data.get('timestamp'),str):data['timestamp']=datetime.fromisoformat(data['timestamp'])
+            event=MessageEvent(**data)
+            event._storage_receipt_id=event.message_id or payload['id']
+            adapter=runner._adapter_for_source(event.source)
+            if adapter is None:continue
+            session_key=runner._session_key_for_source(event.source)
+            if session_key in getattr(adapter,'_active_sessions',{}):continue
+            db=getattr(runner,'_session_db',None)
+            db_path=getattr(db,'db_path',Path(home)/'state.db')
+            await asyncio.to_thread(storage_readable,Path(db_path))
+            # Dispatch inline through the normal handler; send its response via
+            # the existing adapter message path so thread/delivery rules apply.
+            await adapter.handle_message(event)
+        except Exception:
+            logger.exception('Saved inbound replay deferred')
+            break

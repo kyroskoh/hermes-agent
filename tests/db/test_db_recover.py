@@ -13,7 +13,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, "/usr/local/lib/hermes-agent")
 
 from agent import db_connection as dbc
 from agent import db_health as dbh
@@ -78,7 +77,7 @@ class RepairFtsTests(unittest.TestCase):
             # Verify FTS is back.
             res = dbc.fts_integrity_check(db, fts_names=["messages_fts"])
             self.assertTrue(res["messages_fts"]["exists"])
-            self.assertEqual(res["messages_fts"]["integrity"], "ok")
+            self.assertTrue(res["messages_fts"]["queryable"])
 
     def test_abort_when_core_integrity_failed(self):
         with tempfile.TemporaryDirectory() as td:

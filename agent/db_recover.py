@@ -135,8 +135,15 @@ def repair_fts(state_db_path: os.PathLike, *,
         "started_at": time.time(),
     }
 
+    # This may run either inside the caller's own MaintenanceLock (the
+    # documented contract) or standalone (CLI --no-lock escape hatch, or
+    # tests exercising the non-mutating early-exit paths). Only bypass the
+    # normal reader admission wait when this thread actually holds the
+    # exclusive lease for this path.
+    trust = dbm.held_by_current_thread(p)
+
     # 1. Confirm core integrity before touching FTS.
-    core_ok, ic_rows = dbc.integrity_check(p, full=True)
+    core_ok, ic_rows = dbc.integrity_check(p, full=True, trust_maintenance_lock=trust)
     if not core_ok:
         report["status"] = "ABORT_CORE_INTEGRITY_FAILED"
         report["integrity_check"] = ic_rows[:5]
@@ -145,7 +152,8 @@ def repair_fts(state_db_path: os.PathLike, *,
     # 2. Classify FTS state. When ``expected_fts`` is given, missing
     # vtables appear in the result with ``exists=False`` and force a
     # rebuild decision.
-    fts = dbc.fts_integrity_check(p, fts_names=list(expected_fts) if expected_fts else None)
+    fts = dbc.fts_integrity_check(p, fts_names=list(expected_fts) if expected_fts else None,
+                                   trust_maintenance_lock=trust)
     report["fts_pre"] = fts
     need_rebuild = any(
         not v.get("exists") or not v.get("queryable")
@@ -209,11 +217,14 @@ def repair_fts(state_db_path: os.PathLike, *,
         cur.execute("DELETE FROM state_meta WHERE key='fts_rebuild_progress'")
         cur.commit()
 
-    # 4. Verify.
-    post = dbc.fts_integrity_check(p, fts_names=list(expected_fts) if expected_fts else None)
+    # 4. Verify. Deep FTS integrity (the write-based 'integrity-check'
+    # command) cannot run against a live database — see fts_integrity_check.
+    # Success here means each rebuilt table exists and is queryable again.
+    post = dbc.fts_integrity_check(p, fts_names=list(expected_fts) if expected_fts else None,
+                                    trust_maintenance_lock=trust)
     report["fts_post"] = post
     report["status"] = "SUCCESS" if all(
-        v.get("integrity") == "ok" for v in post.values()
+        v.get("exists") and v.get("queryable") for v in post.values()
     ) else "FTS_STILL_DEGRADED"
     report["ended_at"] = time.time()
     return report
@@ -409,7 +420,7 @@ def recover_state_db(state_db_path: os.PathLike, *,
             # No destructive work; just record that we held the lock and
             # verified holders are gone. The .recover path was the
             # original "do nothing" choice — keep behavior parity.
-            qc_ok, qc_detail = dbc.quick_check(p)
+            qc_ok, qc_detail = dbc.quick_check(p, trust_maintenance_lock=True)
             report["status"] = "QUICK_CHECK_OK" if qc_ok else "QUICK_CHECK_FAILED"
             report["quick_check"] = qc_detail
             report["ended_at"] = time.time()
@@ -421,7 +432,7 @@ def recover_state_db(state_db_path: os.PathLike, *,
                 report["status"] = "SOURCE_MISSING"
                 _write_recovery_report(report)
                 return report
-            res = dbc.vacuum_into(p, recovered_path)
+            res = dbc.vacuum_into(p, recovered_path, trust_maintenance_lock=True)
             if not res.get("ok"):
                 report["status"] = "VACUUM_FAILED"
                 report["error"] = res.get("error")

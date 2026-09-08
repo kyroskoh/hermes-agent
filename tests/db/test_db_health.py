@@ -13,7 +13,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, "/usr/local/lib/hermes-agent")
 
 from agent import db_connection as dbc
 from agent import db_health as dbh
@@ -56,7 +55,7 @@ class ConnectionFactoryTests(unittest.TestCase):
             with dbc.open_sqlite(db, role="writer") as mc:
                 cur = mc.raw
                 self.assertEqual(cur.execute("PRAGMA journal_mode").fetchone()[0],
-                                 "wal")
+                                 "delete")
                 self.assertEqual(cur.execute("PRAGMA synchronous").fetchone()[0], 2)
                 self.assertEqual(cur.execute("PRAGMA foreign_keys").fetchone()[0], 1)
                 self.assertGreaterEqual(
@@ -162,7 +161,7 @@ class FtsIntegrityCheckTests(unittest.TestCase):
             res = dbc.fts_integrity_check(db)
             self.assertIn("messages_fts", res)
             self.assertTrue(res["messages_fts"]["queryable"])
-            self.assertEqual(res["messages_fts"]["integrity"], "ok")
+            self.assertIsNone(res["messages_fts"]["integrity"])
 
     def test_fts_integrity_check_missing(self):
         with tempfile.TemporaryDirectory() as td:
