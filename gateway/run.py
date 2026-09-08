@@ -6182,9 +6182,23 @@ class TurnRunner:
 
         if agent is None:
             # Config changed or first message — create fresh agent
+            # NB: ``capabilities`` is intentionally NOT splatted into
+            # ``AIAgent.__init__`` — it's an agent *attribute* (set via
+            # ``agent.runtime_capabilities`` by ``agent_runtime_helpers``), not
+            # a constructor kwarg. Emitting it here would crash every inbound
+            # with ``TypeError: AIAgent.__init__() got an unexpected keyword
+            # argument 'capabilities'`` (incident 2026-09-08). We pop it
+            # defensively so future runtime-builder changes can't reintroduce
+            # the same crash via the loose ``**runtime`` splat.
+            _runtime_for_agent = {
+                k: v
+                for k, v in (turn_route.get("runtime") or {}).items()
+                if k != "capabilities"
+            }
+            _runtime_capabilities = (turn_route.get("runtime") or {}).get("capabilities")
             agent = ctx.AIAgent(
                 model=turn_route["model"],
-                **turn_route["runtime"],
+                **_runtime_for_agent,
                 **_checkpoint_agent_kwargs(ctx.user_config),
                 max_iterations=max_iterations,
                 quiet_mode=True,
@@ -6220,6 +6234,13 @@ class TurnRunner:
                 # a single small file, not part of the expensive walk.
                 load_soul_identity=True,
             )
+            # Mirror ``agent_runtime_helpers.rehydrate_runtime_capabilities``:
+            # capabilities are an attribute, not a constructor kwarg. Keep the
+            # snapshot on the agent so downstream code that reads
+            # ``agent.runtime_capabilities`` still sees what the runtime
+            # builder passed in.
+            if isinstance(_runtime_capabilities, dict) and _runtime_capabilities:
+                agent.runtime_capabilities = dict(_runtime_capabilities)
             if _cache_lock and _cache is not None:
                 with _cache_lock:
                     # Record the session_id the snapshot was taken for
@@ -21221,8 +21242,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     ),
                                     default=False,
                                 )
+                                # Same ``capabilities``-kwarg isolation as the
+                                # main turn path. ``capabilities`` is an agent
+                                # *attribute*, not a constructor kwarg.
+                                _hyg_runtime_for_agent = {
+                                    k: v for k, v in (_hyg_runtime or {}).items()
+                                    if k != "capabilities"
+                                }
+                                _hyg_runtime_capabilities = (_hyg_runtime or {}).get("capabilities")
                                 _hyg_agent = AIAgent(
-                                    **_hyg_runtime,
+                                    **_hyg_runtime_for_agent,
                                     model=_hyg_model,
                                     max_iterations=4,
                                     quiet_mode=True,
@@ -21231,6 +21260,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     session_id=session_entry.session_id,
                                     session_db=_hyg_session_db,
                                 )
+                                if isinstance(_hyg_runtime_capabilities, dict) and _hyg_runtime_capabilities:
+                                    _hyg_agent.runtime_capabilities = dict(_hyg_runtime_capabilities)
                                 _seed_hygiene_system_prompt(
                                     _hyg_agent,
                                     _hyg_session_row,
@@ -24540,9 +24571,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         logger.warning("Background task vision enrichment failed: %s", e)
 
             def run_sync():
+                # Same ``capabilities``-kwarg isolation as the main turn path
+                # at gateway/run.py:_handle_message_with_agent — ``capabilities``
+                # is an agent *attribute*, not a constructor kwarg.
+                _bg_runtime_for_agent = {
+                    k: v
+                    for k, v in (turn_route.get("runtime") or {}).items()
+                    if k != "capabilities"
+                }
+                _bg_runtime_capabilities = (turn_route.get("runtime") or {}).get("capabilities")
                 agent = AIAgent(
                     model=turn_route["model"],
-                    **turn_route["runtime"],
+                    **_bg_runtime_for_agent,
                     **_checkpoint_agent_kwargs(user_config),
                     max_iterations=max_iterations,
                     quiet_mode=True,
@@ -24571,6 +24611,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # Reload from disk — do not reuse the startup snapshot (#60955).
                     fallback_model=self._refresh_fallback_model(),
                 )
+                if isinstance(_bg_runtime_capabilities, dict) and _bg_runtime_capabilities:
+                    agent.runtime_capabilities = dict(_bg_runtime_capabilities)
                 try:
                     return agent.run_conversation(
                         user_message=enriched_prompt,
