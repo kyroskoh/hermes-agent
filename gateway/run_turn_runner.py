@@ -1020,8 +1020,16 @@ class TurnRunner:
         ctx = self._ctx
         runner = self._runner
         src = ctx.source
-        return ctx.AIAgent(
-            model=turn_route["model"], **turn_route["runtime"], **_checkpoint_agent_kwargs(ctx.user_config),
+        # NB: ``capabilities`` is intentionally NOT splatted into ``AIAgent.__init__`` — it's an
+        # agent *attribute* (set via ``agent.runtime_capabilities`` by ``agent_runtime_helpers``),
+        # not a constructor kwarg. Emitting it here would crash every inbound with
+        # ``TypeError: AIAgent.__init__() got an unexpected keyword argument 'capabilities'``
+        # (incident 2026-09-08). We pop it defensively so future runtime-builder changes can't
+        # reintroduce the same crash via the loose ``**runtime`` splat.
+        _runtime_for_agent = {k: v for k, v in (turn_route["runtime"] or {}).items() if k != "capabilities"}
+        _runtime_capabilities = (turn_route["runtime"] or {}).get("capabilities")
+        agent = ctx.AIAgent(
+            model=turn_route["model"], **_runtime_for_agent, **_checkpoint_agent_kwargs(ctx.user_config),
             max_iterations=max_iterations, quiet_mode=True, verbose_logging=False,
             enabled_toolsets=ctx.enabled_toolsets, disabled_toolsets=ctx.disabled_toolsets,
             ephemeral_system_prompt=combined_ephemeral or None,
@@ -1043,6 +1051,12 @@ class TurnRunner:
             # Keep the persona even with minimal context: soul identity is one small file.
             load_soul_identity=True,
         )
+        # Mirror ``agent_runtime_helpers.rehydrate_runtime_capabilities``: capabilities are an
+        # attribute, not a constructor kwarg. Keep the snapshot on the agent so downstream code
+        # that reads ``agent.runtime_capabilities`` still sees what the runtime builder passed in.
+        if isinstance(_runtime_capabilities, dict) and _runtime_capabilities:
+            agent.runtime_capabilities = dict(_runtime_capabilities)
+        return agent
 
     def _resolve_turn_agent(self, turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr):
         """Reuse this session's cached AIAgent (frozen system prompt + tool schemas → prompt cache

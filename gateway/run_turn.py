@@ -1133,11 +1133,17 @@ class GatewayTurnMixin:
         _hyg_checkpoint_required = _is_truthy(
             ((_load_cfg() or {}).get("compression") or {}).get("checkpoint_required"), default=False,
         )
+        # Same ``capabilities``-kwarg isolation as the main turn path — ``capabilities`` is an
+        # agent *attribute*, not a constructor kwarg (incident 2026-09-08).
+        _hyg_runtime_for_agent = {k: v for k, v in (_hyg_runtime or {}).items() if k != "capabilities"}
+        _hyg_runtime_capabilities = (_hyg_runtime or {}).get("capabilities")
         _hyg_agent = AIAgent(
-            **_hyg_runtime, model=_hyg_model, max_iterations=4, quiet_mode=True,
+            **_hyg_runtime_for_agent, model=_hyg_model, max_iterations=4, quiet_mode=True,
             skip_memory=not _hyg_checkpoint_required, enabled_toolsets=["memory"],
             session_id=session_entry.session_id, session_db=_hyg_session_db,
         )
+        if isinstance(_hyg_runtime_capabilities, dict) and _hyg_runtime_capabilities:
+            _hyg_agent.runtime_capabilities = dict(_hyg_runtime_capabilities)
         _seed_hygiene_system_prompt(_hyg_agent, _hyg_session_row)
         # A rebuilt (not retained) prompt is deliberately stale for every real gateway surface.
         _hyg_agent.platform = _GATEWAY_HYGIENE_PLATFORM
@@ -2155,9 +2161,16 @@ class GatewayTurnMixin:
                     logger.warning("Background task vision enrichment failed: %s", e)
 
             def run_sync():
+                # Same ``capabilities``-kwarg isolation as the main turn path at
+                # gateway/run_turn_runner.py:_build_fresh_agent — ``capabilities`` is an agent
+                # *attribute*, not a constructor kwarg (incident 2026-09-08).
+                _bg_runtime_for_agent = {
+                    k: v for k, v in (turn_route["runtime"] or {}).items() if k != "capabilities"
+                }
+                _bg_runtime_capabilities = (turn_route["runtime"] or {}).get("capabilities")
                 agent = AIAgent(
                     model=turn_route["model"],
-                    **turn_route["runtime"],
+                    **_bg_runtime_for_agent,
                     **_checkpoint_agent_kwargs(user_config),
                     max_iterations=max_iterations,
                     quiet_mode=True,
@@ -2183,6 +2196,8 @@ class GatewayTurnMixin:
                     # See #60955.
                     fallback_model=self._refresh_fallback_model(),
                 )
+                if isinstance(_bg_runtime_capabilities, dict) and _bg_runtime_capabilities:
+                    agent.runtime_capabilities = dict(_bg_runtime_capabilities)
                 try:
                     return agent.run_conversation(user_message=enriched_prompt, task_id=task_id)
                 finally:
