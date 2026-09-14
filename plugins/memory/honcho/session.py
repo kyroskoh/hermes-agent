@@ -5,6 +5,7 @@ from __future__ import annotations
 import queue
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, TYPE_CHECKING
