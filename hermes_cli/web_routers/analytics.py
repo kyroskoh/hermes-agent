@@ -149,16 +149,22 @@ def _enumerate_profile_state_db_paths(profile: Optional[str] = None) -> List[Pat
     return paths
 
 
-def _open_session_db_read_only(path: Path):
+def _open_session_db_read_only(path: Path, *, required: bool = False):
     """Open a SessionDB at ``path`` in read-only mode, swallowing stale-schema.
 
     Reuses ``_open_session_db_at_path`` but returns None on failure so the
     analytics merger can drop a corrupt DB instead of erroring the whole
-    endpoint.
+    endpoint. ``required=True`` (the profile the caller actually asked to view,
+    per ``_session_db_path_for_profile``) re-raises instead, so the endpoint's
+    ``corrupt_store_as_status`` wrapper can turn a corrupt primary store into a
+    503 rather than a silently empty result (#96591) — only the OTHER,
+    incidentally-merged-in profile DBs get to degrade quietly.
     """
     try:
         return _open_session_db_at_path(path, read_only=True)
     except Exception as exc:
+        if required:
+            raise
         _log.warning(
             "analytics: failed to open %s in read-only mode (%s); "
             "skipping that profile's rows", path, exc,
@@ -194,6 +200,7 @@ def _get_usage_analytics(days: int = 30, profile: Optional[str] = None):
     if not db_paths:
         # Fallback: open the default store so the endpoint never errors
         db_paths = [Path(_default_db_path())]
+    primary_db_path = _session_db_path_for_profile(profile)
 
     # Merged accumulators
     daily_by_day: Dict[str, Dict[str, Any]] = {}
@@ -213,7 +220,7 @@ def _get_usage_analytics(days: int = 30, profile: Optional[str] = None):
     tools_payload: Optional[List[Any]] = None
 
     for db_path in db_paths:
-        db = _open_session_db_read_only(db_path)
+        db = _open_session_db_read_only(db_path, required=(db_path.resolve() == primary_db_path.resolve()))
         if db is None:
             continue
         try:
@@ -613,6 +620,7 @@ def _get_models_analytics(days: int = 30, profile: Optional[str] = None):
     db_paths = _enumerate_profile_state_db_paths(profile)
     if not db_paths:
         db_paths = [Path(_default_db_path())]
+    primary_db_path = _session_db_path_for_profile(profile)
 
     all_rows: List[Dict[str, Any]] = []
     totals = {
@@ -628,7 +636,7 @@ def _get_models_analytics(days: int = 30, profile: Optional[str] = None):
     }
 
     for db_path in db_paths:
-        db = _open_session_db_read_only(db_path)
+        db = _open_session_db_read_only(db_path, required=(db_path.resolve() == primary_db_path.resolve()))
         if db is None:
             continue
         try:
